@@ -1,0 +1,210 @@
+{% extends "base.html" %}
+{% block title %}{{ project.display_name }} — otreedeploy{% endblock %}
+{% block body %}
+
+<h1>{{ project.display_name }}</h1>
+<p class="sub">
+  <span class="mono">{{ project.slug }}</span>
+  {% if release %} · {{ t("release {release}", release=release) }}{% endif %}
+  {% if otree_version %} · oTree {{ otree_version }}{% endif %}
+</p>
+
+{% if participants %}
+<div class="msg warn">
+  <strong>{{ t("{n} participant is active right now." if participants == 1 else "{n} participants are active right now.", n=participants) }}</strong>
+  {{ t("Actions that would interrupt them are blocked; each one offers an override if you really mean it.") }}
+</div>
+{% endif %}
+
+<div class="panel">
+  <div class="actions">
+    <span class="badge {{ status }}">{{ t(status) }}</span>
+    {% if is_active %}<span class="badge live">{{ t("port {port}") }}</span>{% endif %}
+
+    {% if not is_active %}
+      <form method="post" action="/p/{{ project.slug }}/activate">
+        <button class="btn primary" {{ 'disabled' if not release }}>{{ t("Make this live on port {port}") }}</button>
+      </form>
+      {% if participants %}
+      <form method="post" action="/p/{{ project.slug }}/activate">
+        <input type="hidden" name="force" value="true">
+        <button class="btn danger small">{{ t("Activate anyway") }}</button>
+      </form>
+      {% endif %}
+    {% else %}
+      <a class="btn" href="{{ experiment_origin(request) }}" target="_blank" rel="noopener">{{ t("Open oTree admin ↗") }}</a>
+      <form method="post" action="/p/{{ project.slug }}/restart">
+        <button class="btn">{{ t("Restart") }}</button>
+      </form>
+      <form method="post" action="/p/{{ project.slug }}/stop">
+        <button class="btn">{{ t("Stop") }}</button>
+      </form>
+    {% endif %}
+
+    <a class="btn" href="/upload?slug={{ project.slug }}">{{ t("Upload new version") }}</a>
+    <a class="btn" href="/p/{{ project.slug }}/data">{{ t("Data & downloads") }}</a>
+  </div>
+
+  {% if is_active %}
+  <p class="hint" style="margin-top:12px">
+    {{ t("Participants use {url}.", url='<span class="mono">' ~ experiment_origin(request) ~ '</span>') | safe }}
+    {{ t("The oTree admin username is {user}; the password is below.", user='<span class="mono">admin</span>') | safe }}
+  </p>
+  {% endif %}
+</div>
+
+<div class="grid2">
+  <div>
+    <h2>{{ t("Settings") }}</h2>
+    <form class="panel" method="post" action="/p/{{ project.slug }}/settings">
+      <div class="field">
+        <label for="display_name">{{ t("Display name") }}</label>
+        <input type="text" id="display_name" name="display_name" value="{{ project.display_name }}">
+      </div>
+      <div class="field">
+        <label for="admin_password">{{ t("oTree admin password") }}</label>
+        <input type="text" id="admin_password" name="admin_password" class="mono"
+               value="{{ project.admin_password }}">
+        <p class="hint">{{ t("Username is always {user}.", user='<span class="mono">admin</span>') | safe }}</p>
+      </div>
+      <div class="field">
+        <label for="auth_level">{{ t("Access level") }}</label>
+        <select id="auth_level" name="auth_level">
+          {% for level in auth_levels %}
+          <option value="{{ level }}" {{ 'selected' if project.auth_level == level }}>
+            {{ t("STUDY — participants need a link; admin needs the password" if level == 'STUDY' else "DEMO — the demo page is open to anyone") }}
+          </option>
+          {% endfor %}
+        </select>
+      </div>
+      <button class="btn primary">{{ t("Save") }}</button>
+      <p class="hint" style="margin-top:10px">{{ t("Saving restarts the experiment if it is running.") }}</p>
+    </form>
+  </div>
+
+  <div>
+    <h2>{{ t("Status") }}</h2>
+    <div class="panel">
+      <dl class="kv">
+        <dt>{{ t("Sessions") }}</dt><dd>{{ session_count }}</dd>
+        <dt>{{ t("Database") }}</dt><dd>{{ db_size | filesize }}</dd>
+        <dt>{{ t("Data tables") }}</dt><dd>{{ t("created") if has_data else t("not yet created") }}</dd>
+        <dt>{{ t("Created") }}</dt><dd>{{ project.created_at | datetime }}</dd>
+        <dt>{{ t("Backups") }}</dt><dd>{{ backups | length }}</dd>
+      </dl>
+    </div>
+
+    {% if backups %}
+    <h2>{{ t("Backups") }}</h2>
+    <div class="panel tight">
+      <table>
+        <tbody>
+        {% for b in backups %}
+        <tr>
+          <td>{{ b.when }}</td>
+          <td style="color:var(--muted)">{{ b.size | filesize }}</td>
+          <td style="text-align:right">
+            <a class="btn small" href="/p/{{ project.slug }}/backups/{{ b.name }}">{{ t("Download") }}</a>
+          </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+<h2>{{ t("Releases") }}</h2>
+<div class="panel tight">
+  <table>
+    <thead><tr><th>{{ t("Release") }}</th><th>{{ t("Uploaded file") }}</th><th>oTree</th><th>{{ t("Result") }}</th><th></th></tr></thead>
+    <tbody>
+    {% for r in releases %}
+      <tr>
+        <td class="mono">{{ r.release }}{% if r.release == release %} <span class="badge live">{{ t("current") }}</span>{% endif %}</td>
+        <td style="color:var(--muted)">{{ r.filename or '—' }}</td>
+        <td style="color:var(--muted)">{{ r.otree_version or '—' }}</td>
+        <td>
+          {% if r.status == 'success' %}<span class="badge running">{{ t("ok") }}</span>
+          {% else %}<span class="badge stopped">{{ t(r.status) }}</span>{% endif %}
+        </td>
+        <td style="text-align:right">
+          {% if r.status == 'success' and r.release != release %}
+          <form method="post" action="/p/{{ project.slug }}/rollback">
+            <input type="hidden" name="release" value="{{ r.release }}">
+            <button class="btn small">{{ t("Roll back to this") }}</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="5" class="empty">{{ t("No releases yet.") }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<h2>{{ t("Live log") }}</h2>
+<div class="console" id="console">{{ t("Connecting to the log…") }}</div>
+<p class="hint">{{ t("Streamed from the system journal for this experiment.") }}</p>
+
+<h2>{{ t("Danger zone") }}</h2>
+<details class="danger-zone">
+  <summary>{{ t("Reset the database or delete this experiment") }}</summary>
+  <div>
+    <div class="grid2">
+      <form method="post" action="/p/{{ project.slug }}/reset-db"
+            onsubmit="return confirm({{ t('Delete all collected data for {slug}?', slug=project.slug) | tojson }})">
+        <p><strong>{{ t("Reset the database.") }}</strong>
+        {{ t("Deletes every session and all collected data for this experiment. A backup is saved first, and appears above.") }}</p>
+        <p class="hint">{{ t("Do this when you have changed your models and the experiment no longer starts.") }}</p>
+        <div class="field">
+          <label for="confirmReset">{{ t("Type {slug} to confirm", slug='<span class="mono">' ~ project.slug ~ '</span>') | safe }}</label>
+          <input type="text" id="confirmReset" name="confirm" autocomplete="off">
+        </div>
+        {% if participants %}<label><input type="checkbox" name="force" value="true">
+          {{ t("Yes, even though {n} participant(s) are active", n=participants) }}</label>{% endif %}
+        <button class="btn danger">{{ t("Reset database") }}</button>
+      </form>
+
+      <form method="post" action="/p/{{ project.slug }}/delete"
+            onsubmit="return confirm({{ t('Permanently delete {slug}?', slug=project.slug) | tojson }})">
+        <p><strong>{{ t("Delete this experiment.") }}</strong>
+        {{ t("Removes the code, every release and the database. A final backup is kept.") }}</p>
+        <p class="hint">{{ t("The backup file stays on the server, but this page will be gone.") }}</p>
+        <div class="field">
+          <label for="confirmDelete">{{ t("Type {slug} to confirm", slug='<span class="mono">' ~ project.slug ~ '</span>') | safe }}</label>
+          <input type="text" id="confirmDelete" name="confirm" autocomplete="off">
+        </div>
+        {% if participants %}<label><input type="checkbox" name="force" value="true">
+          {{ t("Yes, even though {n} participant(s) are active", n=participants) }}</label>{% endif %}
+        <button class="btn danger">{{ t("Delete experiment") }}</button>
+      </form>
+    </div>
+  </div>
+</details>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const box = document.getElementById('console');
+  box.textContent = '';
+  const DISCONNECTED = {{ t("(log stream disconnected — reload to reconnect)") | tojson }};
+  const source = new EventSource('/p/{{ project.slug }}/logs/stream');
+  source.onmessage = e => {
+    const line = document.createElement('div');
+    line.textContent = e.data;
+    box.appendChild(line);
+    while (box.childElementCount > 2000) box.removeChild(box.firstChild);
+    box.scrollTop = box.scrollHeight;
+  };
+  source.onerror = () => {
+    const line = document.createElement('div');
+    line.className = 'bad';
+    line.textContent = DISCONNECTED;
+    box.appendChild(line);
+    source.close();
+  };
+</script>
+{% endblock %}

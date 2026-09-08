@@ -1,0 +1,5 @@
+# The management app's entire privileged surface: one root-owned wrapper that validates
+# its own arguments. No wildcards, so this grant cannot widen by accident.
+#
+# Install as /etc/sudoers.d/otreedeploy, mode 0440, root:root.
+otreedeploy ALL=(root) NOPASSWD: /usr/local/sbin/otree-ctl

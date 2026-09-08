@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% set page = 'projects' %}
+{% block body %}
+<h1>{{ t("Experiments") }}</h1>
+<p class="sub">
+  {% if active_slug %}
+    <strong>{{ active_slug }}</strong> {{ t("is live on port {port}.") }}
+  {% else %}
+    {{ t("Nothing is currently serving on port {port}.") }}
+  {% endif %}
+</p>
+
+{% if overviews %}
+<div class="panel tight">
+  {% for o in overviews %}
+  <div class="row">
+    <div class="grow">
+      <a class="name" href="/p/{{ o.project.slug }}">{{ o.project.display_name }}</a>
+      <div class="meta">
+        <span class="mono">{{ o.project.slug }}</span>
+        {% if o.release %} · {{ t("release {release}", release=o.release) }}{% endif %}
+        {% if o.otree_version %} · oTree {{ o.otree_version }}{% endif %}
+        {% if o.session_count %} · {{ t("{n} session" if o.session_count == 1 else "{n} sessions", n=o.session_count) }}{% endif %}
+      </div>
+    </div>
+    {% if o.participants %}
+      <span class="badge enabled">{{ t("{n} active", n=o.participants) }}</span>
+    {% endif %}
+    {% if o.is_active %}<span class="badge live">{{ t("port {port}") }}</span>{% endif %}
+    <span class="badge {{ o.status }}">{{ t(o.status) }}</span>
+    {% if not o.is_active %}
+    <form method="post" action="/p/{{ o.project.slug }}/activate">
+      <button class="btn small" {{ 'disabled' if not o.release }}>{{ t("Activate") }}</button>
+    </form>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="panel">
+  <div class="empty">
+    <p><strong>{{ t("No experiments yet.") }}</strong></p>
+    <p>{{ t("Upload an {file} file to get started.", file='<span class="mono">.otreezip</span>') | safe }}</p>
+    <a class="btn primary" href="/upload">{{ t("Upload an experiment") }}</a>
+  </div>
+</div>
+{% endif %}
+
+<div class="actions" style="margin-top:16px">
+  <a class="btn primary" href="/upload">{{ t("Upload an experiment") }}</a>
+</div>
+
+{% if events %}
+<h2>{{ t("Recent activity") }}</h2>
+<div class="panel tight">
+  <table>
+    <tbody>
+    {% for e in events %}
+      <tr>
+        <td style="width:1%;white-space:nowrap;color:var(--muted)">{{ ago(e.at) }}</td>
+        <td style="width:1%;white-space:nowrap">
+          {% if e.slug %}<a class="mono" href="/p/{{ e.slug }}">{{ e.slug }}</a>{% endif %}
+        </td>
+        <td>{{ t(e.message) }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}

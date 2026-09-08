@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% set page = 'login' %}
+{% block title %}{{ t("Sign in") }} — otreedeploy{% endblock %}
+{% block body %}
+<div class="panel signin">
+  <h1>{{ t("Sign in") }}</h1>
+  <p class="sub">{{ t("This page deploys and manages experiments. Participants never need it — they go straight to the experiment.") }}</p>
+  <form method="post" action="/login">
+    <input type="hidden" name="next" value="{{ next }}">
+    <label for="password">{{ t("Password") }}</label>
+    <input id="password" type="password" name="password" required autofocus
+           autocomplete="current-password">
+    <button class="btn primary" type="submit">{{ t("Sign in") }}</button>
+  </form>
+  <p class="hint">{{ t("Chosen when this server was set up. Once signed in you can change it on the System page.") }}</p>
+</div>
+{% endblock %}

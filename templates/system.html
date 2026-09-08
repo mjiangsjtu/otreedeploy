@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% set page = 'system' %}
+{% block title %}{{ t("System") }} — otreedeploy{% endblock %}
+{% block body %}
+<h1>{{ t("System") }}</h1>
+<p class="sub">{{ t("Health of the machine this lab server runs on.") }}</p>
+
+{% if dry_run %}
+<div class="msg warn">
+  <strong>{{ t("Dry run.") }}</strong>
+  {{ t("Experiments use SQLite instead of PostgreSQL and systemd is simulated. Useful for trying things out; not how the lab server should run.") }}
+</div>
+{% endif %}
+
+<div class="grid2">
+  <div class="panel">
+    <h2 style="margin-top:0">{{ t("Port {port}") }}</h2>
+    {% if active_slug %}
+      <p>{{ t("{slug} is the live experiment.", slug='<span class="badge live">' ~ active_slug ~ '</span>') | safe }}</p>
+    {% else %}
+      <p style="color:var(--muted)">{{ t("Nothing is currently serving.") }}</p>
+    {% endif %}
+    <p class="hint">{{ t("Responding to requests:") }} <strong>{{ t("yes") if otree_port_responding else t("no") }}</strong></p>
+  </div>
+
+  <div class="panel">
+    <h2 style="margin-top:0">{{ t("Disk") }}</h2>
+    <div class="bar"><i style="width: {{ disk.percent }}%"></i></div>
+    <p class="hint">
+      {{ t("{used} used of {total} · {free} free",
+            used=disk.used | filesize, total=disk.total | filesize, free=disk.free | filesize) }}
+    </p>
+  </div>
+</div>
+
+<div class="panel">
+  <dl class="kv">
+    <dt>PostgreSQL</dt><dd>{{ postgres_version or t("not reachable") }}</dd>
+    <dt>{{ t("Experiments") }}</dt><dd class="mono">{{ settings.otree_home }}</dd>
+    <dt>{{ t("Uploads & backups") }}</dt><dd class="mono">{{ settings.state_dir }}</dd>
+  </dl>
+</div>
+
+<h2>{{ t("Access") }}</h2>
+<div class="panel">
+  {% if auth_required %}
+  <p class="hint">{{ t("This page needs a password. The experiment on port {port} does not — participants go straight to it.") }}</p>
+  <form method="post" action="/password" class="passwd">
+    <div class="field">
+      <label for="current_password">{{ t("Current password") }}</label>
+      <input id="current_password" type="password" name="current_password" required
+             autocomplete="current-password">
+    </div>
+    <div class="field">
+      <label for="new_password">{{ t("New password") }}</label>
+      <input id="new_password" type="password" name="new_password" required
+             minlength="{{ min_password_length }}" autocomplete="new-password">
+    </div>
+    <div class="field">
+      <label for="confirm_password">{{ t("Repeat it") }}</label>
+      <input id="confirm_password" type="password" name="confirm_password" required
+             minlength="{{ min_password_length }}" autocomplete="new-password">
+    </div>
+    <button class="btn" type="submit">{{ t("Change password") }}</button>
+  </form>
+  <p class="hint">{{ t("At least {n} characters. Changing it signs out every other browser.", n=min_password_length) }}</p>
+  {% else %}
+  <p>{{ t("No password is set, so anyone who can reach this page can stop an experiment or download its data.") }}</p>
+  <p class="hint">{{ t("Set the first one on the server itself, so nobody on the network can claim it first:") }}</p>
+  <p><code class="mono">sudo -u otreedeploy /opt/otreedeploy/.venv/bin/otreedeploy-passwd</code></p>
+  {% endif %}
+</div>
+
+<h2>{{ t("Activity") }}</h2>
+<div class="panel tight">
+  <table>
+    <tbody>
+    {% for e in events %}
+      <tr>
+        <td style="width:1%;white-space:nowrap;color:var(--muted)">{{ e.at | datetime }}</td>
+        <td style="width:1%;white-space:nowrap">
+          {% if e.slug %}<a class="mono" href="/p/{{ e.slug }}">{{ e.slug }}</a>{% endif %}
+        </td>
+        <td>{{ t(e.message) }}</td>
+      </tr>
+    {% else %}
+      <tr><td class="empty">{{ t("Nothing has happened yet.") }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}{{ job.title }} — otreedeploy{% endblock %}
+{% block body %}
+<h1>{{ job.title }}</h1>
+<p class="sub" id="statusLine">{{ t("Working…") }}</p>
+
+<div class="console" id="console"></div>
+
+<div class="actions" style="margin-top:16px" id="done" hidden>
+  <a class="btn primary" id="projectLink" href="/">{{ t("Go to the project") }}</a>
+  <a class="btn" href="/">{{ t("All experiments") }}</a>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const box = document.getElementById('console');
+  const status = document.getElementById('statusLine');
+  const done = document.getElementById('done');
+  const slug = {{ (job.slug or '') | tojson }};
+  const MSG = {
+    success: {{ t("Finished successfully.") | tojson }},
+    blocked: {{ t("Stopped to protect a session in progress.") | tojson }},
+    failed:  {{ t("This deploy failed. Nothing was changed for participants.") | tojson }},
+  };
+
+  function append(text) {
+    const line = document.createElement('div');
+    if (text.startsWith('$ ')) line.className = 'cmd';
+    if (/^\s*(Failed|Stopped|Unexpected error|ERROR)/.test(text)) line.className = 'bad';
+    line.textContent = text;
+    box.appendChild(line);
+    box.scrollTop = box.scrollHeight;
+  }
+
+  const source = new EventSource(window.location.pathname + '/stream');
+  source.onmessage = e => append(e.data);
+  source.addEventListener('done', e => {
+    source.close();
+    const state = e.data.replace('__status__:', '');
+    status.textContent = MSG[state] || MSG.failed;
+    if (slug) document.getElementById('projectLink').href = '/p/' + slug;
+    done.hidden = false;
+  });
+  source.onerror = () => { source.close(); };
+</script>
+{% endblock %}

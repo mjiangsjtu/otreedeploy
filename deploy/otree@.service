@@ -1,0 +1,55 @@
+# One oTree experiment. Instantiated per project: otree@<slug>.service
+#
+# Exactly one instance is enabled at a time -- "enabled" is what makes a project the live
+# one, which is also what brings it back after a reboot.
+#
+# Installed by bootstrap.sh as /etc/systemd/system/otree@.service
+
+[Unit]
+Description=oTree experiment: %i
+Documentation=https://otree.readthedocs.io/
+After=network-online.target postgresql.service
+Wants=network-online.target
+Requires=postgresql.service
+
+[Service]
+Type=exec
+User=otree
+Group=otree
+WorkingDirectory=/srv/otree/%i/current
+EnvironmentFile=/srv/otree/%i/env
+
+# `otree prodserver` re-invokes itself as the bare name `otree` to spawn its timeout
+# worker, so the venv must be on PATH -- an absolute ExecStart alone is not enough and
+# the server exits immediately without this.
+Environment=PATH=/srv/otree/%i/current/.venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/srv/otree/%i/current/.venv/bin/otree prodserver ${PORT}
+
+# Binding port 80 without running as root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+Restart=always
+RestartSec=3
+# Default KillMode=control-group reaps the timeout worker along with the server.
+TimeoutStopSec=30
+
+# This runs experimenter-supplied Python. Keep it away from everything it does not need.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+ReadWritePaths=/srv/otree/%i
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=otree-%i
+
+[Install]
+WantedBy=multi-user.target

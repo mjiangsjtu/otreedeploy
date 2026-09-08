@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}{{ t("Data") }} — {{ project.display_name }}{% endblock %}
+{% block body %}
+<h1>{{ t("Data & downloads") }}</h1>
+<p class="sub">
+  <a href="/p/{{ project.slug }}">{{ project.display_name }}</a>
+  · <span class="mono">{{ project.slug }}</span>
+</p>
+
+{% if status != 'running' %}
+<div class="msg warn">
+  {{ t("This experiment is not currently running. Downloads still work — it is started privately for a moment to produce the file, without touching whatever is live on port {port}.") }}
+</div>
+{% endif %}
+
+{% if not sessions %}
+<div class="panel"><div class="empty">
+  <p><strong>{{ t("No data yet.") }}</strong></p>
+  {% if has_data %}
+  <p>{{ t("The database is ready. Once you create a session in the oTree admin and participants take part, their data appears here.") }}</p>
+  {% else %}
+  <p>{{ t("This experiment has not been started yet, so it has no database tables.") }}</p>
+  {% endif %}
+</div></div>
+{% else %}
+
+<h2>{{ t("Everything, across all sessions") }}</h2>
+<div class="panel">
+  <div class="actions">
+    <a class="btn primary" href="/p/{{ project.slug }}/data/wide.csv">{{ t("All sessions, wide format (CSV)") }}</a>
+    <a class="btn" href="/p/{{ project.slug }}/data/page_times.csv">{{ t("Page times (CSV)") }}</a>
+    <a class="btn" href="/p/{{ project.slug }}/data/chat.csv">{{ t("Chat messages (CSV)") }}</a>
+  </div>
+  <p class="hint" style="margin-top:12px">
+    {{ t("“Wide format” is the one-row-per-participant file most analyses start from — the same file oTree’s own data page produces.") }}
+  </p>
+</div>
+
+<h2>{{ t("By session") }}</h2>
+<div class="panel tight">
+  <table>
+    <thead><tr><th>{{ t("Session") }}</th><th>{{ t("Label") }}</th><th>{{ t("Participants") }}</th><th>{{ t("Created") }}</th><th></th></tr></thead>
+    <tbody>
+    {% for s in sessions %}
+      <tr>
+        <td class="mono">{{ s.code }}</td>
+        <td>{{ s.label or '—' }}</td>
+        <td>{{ s.num_participants if s.num_participants is not none else '—' }}</td>
+        <td style="color:var(--muted)">{{ s.created_iso }}</td>
+        <td style="text-align:right">
+          <a class="btn small" href="/p/{{ project.slug }}/data/wide.csv?session_code={{ s.code }}">{{ t("Download CSV") }}</a>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,35 @@
+# The management web app.
+#
+# Installed by bootstrap.sh as /etc/systemd/system/otreedeploy.service
+
+[Unit]
+Description=otreedeploy -- oTree deployment manager
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=otreedeploy
+Group=otreedeploy
+# Reading the journal for the live log view comes from group membership, not privilege.
+SupplementaryGroups=systemd-journal otree
+WorkingDirectory=/opt/otreedeploy
+Environment=PATH=/opt/otreedeploy/.venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/opt/otreedeploy/.venv/bin/otreedeploy --host 0.0.0.0 --port 8000
+
+Restart=always
+RestartSec=3
+
+# Deliberately NOT NoNewPrivileges: this service's one privileged action is calling
+# /usr/local/sbin/otree-ctl through sudo, and NoNewPrivileges would block that.
+PrivateTmp=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=otreedeploy
+
+[Install]
+WantedBy=multi-user.target

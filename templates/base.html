@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="{{ html_lang }}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}otreedeploy{% endblock %}</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='14'>🧪</text></svg>">
+</head>
+<body>
+<header class="top">
+  <div class="inner">
+    <a class="brand" href="/">🧪 otreedeploy</a>
+    {% if signed_in or not auth_required %}
+    <nav>
+      <a href="/" class="{{ 'on' if page == 'projects' }}">{{ t("Projects") }}</a>
+      <a href="/upload" class="{{ 'on' if page == 'upload' }}">{{ t("Upload") }}</a>
+      <a href="/system" class="{{ 'on' if page == 'system' }}">{{ t("System") }}</a>
+    </nav>
+    {% endif %}
+    <nav class="lang" aria-label="{{ t('Language') }}">
+      {% for code, label in languages.items() %}
+      <a href="/lang/{{ code }}?next={{ request.url.path | urlencode }}"
+         class="{{ 'on' if code == lang }}"
+         lang="{{ code }}" hreflang="{{ code }}"
+         {{ 'aria-current="true"' if code == lang }}>{{ label }}</a>
+      {% endfor %}
+    </nav>
+    {% if signed_in %}
+    <form class="signout" method="post" action="/logout">
+      <button type="submit">{{ t("Sign out") }}</button>
+    </form>
+    {% endif %}
+  </div>
+</header>
+<main>
+  {% if not auth_required and not dry_run %}
+  <div class="msg warn">
+    <strong>{{ t("No password is set.") }}</strong>
+    {{ t("Anyone who can reach this page can stop an experiment or download its data. Set one on the server:") }}
+    <code class="mono">sudo -u otreedeploy /opt/otreedeploy/.venv/bin/otreedeploy-passwd</code>
+  </div>
+  {% endif %}
+  {% if error %}<div class="msg bad">{{ t(error) }}</div>{% endif %}
+  {% if notice %}<div class="msg ok">{{ t(notice) }}</div>{% endif %}
+  {% block body %}{% endblock %}
+</main>
+{% block scripts %}{% endblock %}
+</body>
+</html>

@@ -1,0 +1,50 @@
+#!/bin/bash
+# otree-ctl -- the only privileged operation otreedeploy is allowed to perform.
+#
+# The management app runs unprivileged and calls this through a single fixed sudoers
+# entry. Validation lives here, in a root-owned script the app cannot modify, rather than
+# in a sudoers wildcard: argument wildcards in sudoers are notoriously easy to widen by
+# accident, whereas the regex below can only ever match a well-formed instance name.
+#
+# Usage: otree-ctl <verb> [slug] [properties...]
+
+set -euo pipefail
+
+SYSTEMCTL=/usr/bin/systemctl
+SLUG_RE='^[a-z][a-z0-9_]{0,38}$'
+
+die() { echo "otree-ctl: $*" >&2; exit 64; }
+
+[[ $# -ge 1 ]] || die "no verb given"
+verb=$1
+shift
+
+if [[ $verb == "daemon-reload" ]]; then
+    [[ $# -eq 0 ]] || die "daemon-reload takes no arguments"
+    exec "$SYSTEMCTL" daemon-reload
+fi
+
+case $verb in
+    start|stop|restart|enable|disable|is-active|is-enabled|show) ;;
+    *) die "verb not permitted: $verb" ;;
+esac
+
+[[ $# -ge 1 ]] || die "$verb needs a project name"
+slug=$1
+shift
+
+[[ $slug =~ $SLUG_RE ]] || die "invalid project name: $slug"
+
+unit="otree@${slug}.service"
+
+if [[ $verb == "show" ]]; then
+    args=()
+    for prop in "$@"; do
+        [[ $prop =~ ^[A-Za-z]+$ ]] || die "invalid property: $prop"
+        args+=(-p "$prop")
+    done
+    exec "$SYSTEMCTL" show "$unit" "${args[@]}"
+fi
+
+[[ $# -eq 0 ]] || die "$verb takes no extra arguments"
+exec "$SYSTEMCTL" "$verb" "$unit"

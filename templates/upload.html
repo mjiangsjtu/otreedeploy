@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% set page = 'upload' %}
+{% block body %}
+<h1>{% if project %}{{ t("Upload a new version of {name}", name=project.display_name) }}{% else %}{{ t("Upload an experiment") }}{% endif %}</h1>
+<p class="sub">
+  {% if project %}
+    {{ t("Your collected data will be kept. Only the code is replaced.") }}
+  {% else %}
+    {{ t("Select the {file} file produced by {cmd}.",
+         file='<span class="mono">.otreezip</span>',
+         cmd='<span class="mono">otree zip</span>') | safe }}
+  {% endif %}
+</p>
+
+<form class="panel" method="post" action="/upload" enctype="multipart/form-data" id="form">
+  {% if slug %}<input type="hidden" name="slug" value="{{ slug }}">{% endif %}
+
+  <div class="dropzone" id="drop">
+    <div class="big" id="dropLabel">{{ t("Drop your .otreezip here") }}</div>
+    <div class="hint">{{ t("or click to choose a file") }}</div>
+    <input type="file" name="file" id="file" accept=".otreezip,.tar.gz,.tgz"
+           required style="display:none">
+  </div>
+
+  <div class="actions" style="margin-top:16px">
+    <button class="btn primary" type="submit" id="go">{{ t("Deploy") }}</button>
+    <a class="btn" href="{{ '/p/' ~ slug if slug else '/' }}">{{ t("Cancel") }}</a>
+  </div>
+  <p class="hint" style="margin-top:12px">
+    {{ t("The upload is checked, its dependencies installed, and the experiment test-started on a private port before anything reaches port {port}. If it fails to start, whatever is currently live keeps running.") }}
+  </p>
+</form>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const drop = document.getElementById('drop');
+  const input = document.getElementById('file');
+  const label = document.getElementById('dropLabel');
+  const UPLOADING = {{ t("Uploading…") | tojson }};
+
+  drop.addEventListener('click', () => input.click());
+  input.addEventListener('change', () => {
+    if (input.files.length) label.textContent = input.files[0].name;
+  });
+  ['dragenter', 'dragover'].forEach(evt =>
+    drop.addEventListener(evt, e => { e.preventDefault(); drop.classList.add('over'); }));
+  ['dragleave', 'drop'].forEach(evt =>
+    drop.addEventListener(evt, e => { e.preventDefault(); drop.classList.remove('over'); }));
+  drop.addEventListener('drop', e => {
+    if (e.dataTransfer.files.length) {
+      input.files = e.dataTransfer.files;
+      label.textContent = input.files[0].name;
+    }
+  });
+  document.getElementById('form').addEventListener('submit', () => {
+    const go = document.getElementById('go');
+    go.disabled = true;
+    go.textContent = UPLOADING;
+  });
+</script>
+{% endblock %}
