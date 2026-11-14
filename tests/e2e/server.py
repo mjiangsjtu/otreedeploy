@@ -211,7 +211,10 @@ class Manager:
 
     def __init__(self, base: str) -> None:
         self.base = base
-        self.http = httpx.Client(base_url=base, timeout=600, follow_redirects=False)
+        # A browser sends its page's origin with every form POST; the app refuses
+        # writes without it (m1).
+        self.http = httpx.Client(base_url=base, timeout=600, follow_redirects=False,
+                                 headers={"Origin": base})
 
     def login(self, password: str = PASSWORD) -> "Manager":
         r = self.http.post("/login", data={"password": password, "next": "/"})

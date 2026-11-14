@@ -309,6 +309,25 @@ def export_csv(
     return response.content, stem
 
 
+def serves_project(port: int, rest_key: str, host: str = "127.0.0.1") -> bool:
+    """True only if the server on this port is the project holding this REST key.
+
+    "Something answers on port 80" is not enough to call a restart successful: another
+    server can hold the port while oTree crash-loops behind it ("address already in
+    use"), or a different project can still be answering. oTree checks the REST key on
+    every REST endpoint, and each project has its own key, so a 200 here identifies it.
+    """
+    try:
+        response = httpx.get(
+            f"http://{host}:{port}/api/otree_version",
+            headers={"otree-rest-key": rest_key},
+            timeout=5.0,
+        )
+        return response.status_code == 200 and "version" in response.json()
+    except (httpx.HTTPError, ValueError):
+        return False
+
+
 def otree_version(port: int, rest_key: str) -> str | None:
     try:
         return _get(port, "/api/otree_version", rest_key).json().get("version")

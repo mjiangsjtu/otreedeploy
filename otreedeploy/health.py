@@ -25,10 +25,12 @@ def port_open(port: int, host: str = "127.0.0.1", timeout: float = 1.0) -> bool:
 
 
 def responds(port: int, host: str = "127.0.0.1", timeout: float = 5.0) -> bool:
-    """True if something speaks HTTP on this port.
+    """True if something speaks HTTP on this port without a server error.
 
-    Any status code counts: a redirect or a 403 still proves the app is serving. Only a
-    connection failure or a non-HTTP response means "not ready".
+    A redirect, a 403 or a 404 still proves the app is serving. A 5xx does not: oTree
+    answers 500 when it cannot use its database, and "it starts and responds" must not
+    be claimed for a server in that state. A connection failure or a non-HTTP response
+    also means "not ready".
 
     ``HTTPException`` covers the garbage-on-the-wire cases -- a half-initialised server
     writing before it speaks HTTP, or a truncated reply. It also covers the TCP
@@ -40,10 +42,22 @@ def responds(port: int, host: str = "127.0.0.1", timeout: float = 5.0) -> bool:
     try:
         with urllib.request.urlopen(url, timeout=timeout):
             return True
-    except urllib.error.HTTPError:
-        return True
+    except urllib.error.HTTPError as exc:
+        return exc.code < 500
     except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError):
         return False
+
+
+def wait_for(predicate, timeout: float = config.BOOT_TIMEOUT_SECONDS) -> bool:
+    """Poll ``predicate`` with backoff until it is true or the timeout expires."""
+    deadline = time.monotonic() + timeout
+    delay = 0.25
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(delay)
+        delay = min(delay * 1.5, 2.0)
+    return False
 
 
 def wait_until_ready(

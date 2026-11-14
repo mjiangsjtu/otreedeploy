@@ -24,7 +24,7 @@ def client(root):
     db.init()
     from otreedeploy.app import app
 
-    with TestClient(app) as test_client:
+    with TestClient(app, headers={"Origin": "http://testserver"}) as test_client:
         yield test_client
 
 

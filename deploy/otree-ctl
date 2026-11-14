@@ -18,9 +18,11 @@
 #   otree-ctl show <slug> [Property...]
 #   otree-ctl provision|unprovision <slug>
 #   otree-ctl build|resetdb|clean <slug> <release>
+#   otree-ctl schema <slug> <release> check|apply
 #   otree-ctl boot <slug> <release> <port>
 #   otree-ctl unboot <slug> <port>
 #   otree-ctl unboot-all
+#   otree-ctl restore <slug>          (a gzipped SQL backup on stdin)
 
 set -euo pipefail
 
@@ -29,6 +31,7 @@ SYSTEMD_RUN=/usr/bin/systemd-run
 UV=/usr/local/bin/uv
 OTREE_HOME=/srv/otree
 APP_USER=otreedeploy
+SCHEMA_PROBE=/opt/otreedeploy/otreedeploy/schema_probe.py
 DROPIN_ROOT=/etc/systemd/system
 
 SLUG_RE='^[a-z][a-z0-9_]{0,38}$'
@@ -250,6 +253,16 @@ resetdb)
     run_confined "$1" "$dir" yes "$dir/.venv/bin/otree" resetdb --noinput
     ;;
 
+schema)
+    # Compare the release's models with the database, and with `apply` add the
+    # missing nullable columns. Imports the project's models, so it runs confined too.
+    need_args $# 3
+    check_slug "$1"; check_release "$2"
+    [[ $3 == check || $3 == apply ]] || die "schema mode must be check or apply"
+    dir=$(release_dir "$1" "$2")
+    run_confined "$1" "$dir" yes "$dir/.venv/bin/python" "$SCHEMA_PROBE" "$3"
+    ;;
+
 clean)
     # Remove what the project user created inside a release (its .venv, oTree's stray
     # db.sqlite3), as that user, so the app can delete the rest. Running this as root
@@ -288,6 +301,49 @@ unboot)
 unboot-all)
     need_args $# 0
     exec "$SYSTEMCTL" stop 'otree-boot-*.service'
+    ;;
+
+restore)
+    # Replace a project's database with a backup read from stdin. Loaded into a fresh
+    # database first, as the project's own role (so every object belongs to it), in
+    # one transaction that stops at the first error; only a complete load is swapped
+    # in. A backup that does not load cleanly therefore changes nothing.
+    need_args $# 1
+    check_slug "$1"
+    slug=$1
+    user=$(project_user "$slug")
+    db="otree_$slug"
+    staging="${db}__restore"
+    old="${db}__replaced"
+    [[ -n $(psql_admin postgres "SELECT 1 FROM pg_database WHERE datname = '$db'") ]] \
+        || die "project $slug has no database; upload it again first"
+
+    psql_admin postgres "DROP DATABASE IF EXISTS \"$staging\""
+    psql_admin postgres "CREATE DATABASE \"$staging\" OWNER \"$user\""
+    psql_admin postgres "REVOKE CONNECT, TEMPORARY ON DATABASE \"$staging\" FROM PUBLIC"
+    if ! gunzip -c | runuser -u "$user" -- psql -X -q -v ON_ERROR_STOP=1 \
+            --single-transaction -d "$staging" >/dev/null; then
+        psql_admin postgres "DROP DATABASE IF EXISTS \"$staging\""
+        echo "otree-ctl: the backup could not be loaded; the database was not changed" >&2
+        exit 65
+    fi
+
+    # The experiment keeps one connection for its whole life and cannot survive the
+    # swap, so it is stopped around it and started again if it was running.
+    unit="otree@$slug.service"
+    was_active=no
+    if "$SYSTEMCTL" is-active --quiet "$unit"; then was_active=yes; "$SYSTEMCTL" stop "$unit"; fi
+    "$SYSTEMCTL" stop "otree-boot-$slug-*.service" >/dev/null 2>&1 || true
+    for name in "$db" "$staging"; do
+        psql_admin postgres "SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+                             WHERE datname = '$name'" >/dev/null
+    done
+    psql_admin postgres "DROP DATABASE IF EXISTS \"$old\""
+    psql_admin postgres "ALTER DATABASE \"$db\" RENAME TO \"$old\""
+    psql_admin postgres "ALTER DATABASE \"$staging\" RENAME TO \"$db\""
+    psql_admin postgres "DROP DATABASE \"$old\""
+    if [[ $was_active == yes ]]; then "$SYSTEMCTL" start "$unit"; fi
+    echo "restored"
     ;;
 
 *)

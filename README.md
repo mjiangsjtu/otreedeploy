@@ -205,10 +205,18 @@ the password shown on the project page.
 data is kept; only the code is replaced. If the new code fails to start, the old version
 keeps serving.
 
-> oTree has no database migrations. If you add or remove model fields, the existing
-> database no longer matches your code and the experiment will not start. The deploy
-> catches this before it goes live and points you at *Reset database*, which takes a
-> backup first.
+> oTree has no database migrations, and on its own it does not notice when your models
+> and the database disagree. The study starts normally, then every participant gets an
+> error page. So each upload compares the new code with the existing database before
+> anything goes live:
+>
+> - **A new field or a new app:** added to the database automatically. Rows collected
+>   earlier simply have the new field empty.
+> - **A removed field:** ignored; the data already collected for it is kept.
+> - **A field whose type changes** (say, a number becomes text), or a new required
+>   field without a default: the upload is refused and the live study is untouched. You
+>   can keep the old definition, upload the change as a new project, or use
+>   *Reset database*, which deletes the collected data after taking a backup.
 
 **Get your data.** The *Data & downloads* page offers the same CSV files as oTree's own
 data page, per session or across all of them — and it works whether or not the experiment
@@ -399,11 +407,24 @@ download the resulting CSV.
 | Every page returns 503 | `/var/lib/otreedeploy/auth.json` is damaged. That is refused rather than treated as "no password"; rewrite it with the command above |
 
 Backups are plain gzipped `pg_dump` files in `/var/lib/otreedeploy/backups/<slug>/`, and
-also downloadable from the project page. To restore one:
+also downloadable from the project page. To put one back, use **Restore a backup** in the
+project's danger zone. It works like this:
+
+1. The current data is backed up first (`…-before-restore.sql.gz`), so a restore can be
+   undone the same way.
+2. The backup is loaded into a fresh database in a single transaction that stops at
+   the first error. A backup that does not load cleanly leaves the data exactly as it was.
+3. The restored database replaces the current one. The experiment is restarted if it
+   was running.
+
+The same from a shell, for example on a copy of the server:
 
 ```bash
-gunzip -c backup.sql.gz | sudo -u otreedeploy psql otree_<slug>
+sudo /usr/local/sbin/otree-ctl restore <slug> < /var/lib/otreedeploy/backups/<slug>/<backup>.sql.gz
 ```
+
+The project must exist on the server: after deleting one, upload it again under the same
+name, then restore.
 
 ## License
 

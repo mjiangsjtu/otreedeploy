@@ -14,7 +14,6 @@ def test_the_login_page_does_not_let_a_url_choose_the_response_size(server):
     assert len(r.content) < 200_000
 
 
-@pytest.mark.xfail(strict=True, reason="m1: no CSRF protection; SameSite ignores the port")
 def test_a_form_posted_from_the_experiment_origin_is_refused(server, manager, workdir):
     deploy_live(server, manager, projects.labdemo(workdir))
     r = manager.http.post(
@@ -49,7 +48,6 @@ def test_a_participant_who_just_loaded_a_page_blocks_stop(server, manager, workd
     assert server.unit_active("labdemo")
 
 
-@pytest.mark.xfail(strict=True, reason="m2: the UI offers no override for Stop/Restart/Roll back")
 def test_the_project_page_offers_an_explicit_override_when_stop_is_blocked(
     server, manager, workdir
 ):

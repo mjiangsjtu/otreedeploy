@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from otreedeploy import config, health
+from otreedeploy import otreeapi, config, health
 
 KERNEL_PORT_RANGE = Path("/proc/sys/net/ipv4/ip_local_port_range")
 
@@ -59,6 +59,19 @@ def test_an_error_status_still_counts_as_ready(fake_server):
     """A 403 proves the app is serving; only silence or garbage means not ready."""
     port = fake_server(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
     assert health.responds(port, timeout=2.0) is True
+
+
+def test_a_server_error_is_not_ready(fake_server):
+    """oTree answers 500 when it cannot use its database; that is not "it works"."""
+    port = fake_server(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n")
+    assert health.responds(port, timeout=2.0) is False
+
+
+def test_a_server_that_is_not_this_project_is_not_taken_for_it(fake_server):
+    """Something else on port 80 -- here, a plain web server -- must not count as the
+    project having started."""
+    port = fake_server(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+    assert otreeapi.serves_project(port, "key") is False
 
 
 def test_non_http_reply_is_not_ready_rather_than_an_exception(fake_server):

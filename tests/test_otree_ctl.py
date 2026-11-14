@@ -216,3 +216,23 @@ def test_boot_and_unboot_reject_ports_outside_the_private_range(ctl, port):
 def test_rejects_wrong_argument_counts_and_names(ctl, args):
     assert ctl(*args).returncode == 64
     assert _calls(ctl) == []
+
+
+@pytest.mark.parametrize("args", [("restore",), ("restore", "../x"), ("restore", "study", "x")])
+def test_restore_rejects_bad_arguments(ctl, args):
+    assert ctl(*args).returncode == 64
+    assert _calls(ctl) == []
+
+
+def test_schema_runs_the_probe_confined_with_the_projects_environment(ctl):
+    assert ctl("schema", "study", RELEASE, "check").returncode == 0
+    (call,) = _calls(ctl)
+    assert "--uid=otree_study" in call and "ProtectSystem=strict" in call
+    assert f"EnvironmentFile={ctl.home}/study/env" in call
+    assert call.endswith("/.venv/bin/python /opt/otreedeploy/otreedeploy/schema_probe.py check")
+
+
+@pytest.mark.parametrize("mode", ["", "drop", "apply;reboot", "--help"])
+def test_schema_accepts_only_check_or_apply(ctl, mode):
+    assert ctl("schema", "study", RELEASE, mode).returncode == 64
+    assert _calls(ctl) == []

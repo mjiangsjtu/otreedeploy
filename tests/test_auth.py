@@ -31,7 +31,7 @@ def client(root):
     db.init()
     from otreedeploy.app import app
 
-    with TestClient(app, follow_redirects=False) as test_client:
+    with TestClient(app, follow_redirects=False, headers={"Origin": "http://testserver"}) as test_client:
         yield test_client
 
 
@@ -323,3 +323,44 @@ def test_an_unknown_hash_algorithm_locks_the_app(guarded, root):
     payload["algorithm"] = "rot13"
     path.write_text(json.dumps(payload))
     assert guarded.get("/").status_code == 503
+
+
+# ------------------------------------------------------------- forged writes (m1)
+
+
+def _post_restart(client, **headers):
+    client.headers.pop("Origin", None)
+    return client.post("/p/demo/restart", data={"force": "true"}, headers=headers)
+
+
+def test_a_form_posted_from_the_experiment_port_is_refused(guarded):
+    """Same site, different port: SameSite cookies would let this through."""
+    sign_in(guarded)
+    response = _post_restart(guarded, Origin="http://testserver:80")
+    assert response.status_code == 403
+    response = _post_restart(guarded, Origin="http://testserver:8080")
+    assert response.status_code == 403
+
+
+def test_a_write_with_neither_origin_nor_referer_is_refused(guarded):
+    sign_in(guarded)
+    assert _post_restart(guarded).status_code == 403
+
+
+def test_a_referer_from_another_port_is_refused_and_from_this_app_accepted(guarded):
+    sign_in(guarded)
+    assert _post_restart(guarded, Referer="http://testserver:80/p/x/Page/1").status_code == 403
+    response = _post_restart(guarded, Referer="http://testserver/p/demo")
+    assert response.status_code != 403
+
+
+def test_the_sign_in_form_is_protected_too(client):
+    client.headers.pop("Origin", None)
+    response = client.post("/login", data={"password": "x"},
+                           headers={"Origin": "http://evil.example"})
+    assert response.status_code == 403
+
+
+def test_reading_pages_needs_no_origin(guarded):
+    guarded.headers.pop("Origin", None)
+    assert guarded.get("/login").status_code == 200

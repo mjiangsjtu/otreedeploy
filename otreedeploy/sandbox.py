@@ -88,6 +88,35 @@ def unprovision(slug: str) -> None:
     _ctl("unprovision", slug)
 
 
+def restore(slug: str, backup: Path) -> None:
+    """Replace the project's database with a backup, all or nothing.
+
+    The backup is streamed to the root wrapper on stdin rather than named by path, so
+    root never opens a file in a directory this app controls.
+    """
+    projects.validate(slug)
+    if config.dry_run():
+        import gzip
+
+        target = postgres._sqlite_path(slug)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        data = gzip.decompress(backup.read_bytes())
+        tmp = target.with_suffix(".restore")
+        tmp.write_bytes(data)
+        tmp.replace(target)
+        return
+    with open(backup, "rb") as source:
+        result = subprocess.run(
+            ["sudo", "-n", systemd.OTREE_CTL, "restore", slug],
+            stdin=source,
+            capture_output=True,
+            text=True,
+            timeout=3600,
+        )
+    if result.returncode != 0:
+        raise SandboxError((result.stderr or result.stdout).strip() or "restore failed")
+
+
 # ------------------------------------------------------------ running its code
 
 
@@ -130,6 +159,38 @@ def resetdb(slug: str, release_dir: Path, env: dict[str, str], log: Logger) -> N
         )
     if code != 0:
         raise SandboxError("otree resetdb failed; the database schema could not be created")
+
+
+def schema(slug: str, release_dir: Path, env: dict[str, str], mode: str, log: Logger) -> dict:
+    """Compare the release's models with the database (``check``), or also add the
+    missing nullable columns (``apply``). Returns the probe's report; see
+    ``schema_probe.py``. ``env`` is used only in a dry run."""
+    import json
+
+    from . import schema_probe
+
+    assert mode in {"check", "apply"}
+    output: list[str] = []
+    if config.dry_run():
+        result = subprocess.run(
+            [str(builder.venv_python(release_dir)), schema_probe.__file__, mode],
+            cwd=release_dir, env=env, capture_output=True, text=True, timeout=600,
+        )
+        output = (result.stdout + result.stderr).splitlines()
+        code = result.returncode
+    else:
+        code = _ctl_stream(
+            ["schema", slug, _release_name(slug, release_dir), mode], output.append
+        )
+    for line in output:
+        if line.startswith(schema_probe.MARKER):
+            return json.loads(line[len(schema_probe.MARKER):])
+    for line in output[-30:]:
+        log(f"  {line}")
+    raise SandboxError(
+        f"could not compare the new code with the database (exit {code}); "
+        "see the log above"
+    )
 
 
 def clean(slug: str, release_dir: Path) -> None:

@@ -65,6 +65,18 @@ def with_extra_field(directory: Path) -> Path:
     return _write(members, directory / "labdemo.otreezip")
 
 
+def with_changed_field_type(directory: Path) -> Path:
+    """The number field becomes text: the collected numbers cannot follow automatically."""
+    members = _read()
+    _edit(
+        members,
+        "simple_task/__init__.py",
+        "    answer = models.IntegerField(label='Pick a number', min=0, max=10)\n",
+        "    answer = models.StringField(label='Pick a word')\n",
+    )
+    return _write(members, directory / "labdemo.otreezip")
+
+
 def with_new_app(directory: Path) -> Path:
     """The same study with a questionnaire app appended to the session."""
     members = _read()

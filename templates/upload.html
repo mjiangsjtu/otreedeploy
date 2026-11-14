@@ -22,6 +22,14 @@
            required style="display:none">
   </div>
 
+  {% if participants %}
+  <div class="msg warn" style="margin-top:16px">
+    {{ t("{n} participant(s) are active in this experiment. Making a new version live restarts it, which interrupts them, so the upload is refused unless you tick this box.", n=participants) }}
+    <label style="display:block;margin-top:8px"><input type="checkbox" name="force" value="true">
+      {{ t("Yes, deploy even though {n} participant(s) are active", n=participants) }}</label>
+  </div>
+  {% endif %}
+
   <div class="actions" style="margin-top:16px">
     <button class="btn primary" type="submit" id="go">{{ t("Deploy") }}</button>
     <a class="btn" href="{{ '/p/' ~ slug if slug else '/' }}">{{ t("Cancel") }}</a>

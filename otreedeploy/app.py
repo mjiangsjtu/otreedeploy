@@ -139,6 +139,8 @@ app = FastAPI(title="otreedeploy", docs_url=None, redoc_url=None, lifespan=_life
 # Wraps every route and the static mount, so a page added later is protected by default
 # rather than by remembering to protect it.
 app.add_middleware(auth.RequireLogin)
+# Added last, so it runs first: a forged write is refused before anything else.
+app.add_middleware(auth.SameOriginWrites)
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
 
@@ -414,7 +416,15 @@ def _system_back(message: str, error: bool = False) -> RedirectResponse:
 
 @app.get("/upload", response_class=HTMLResponse)
 def upload_form(request: Request, slug: str | None = None):
-    return _render(request, "upload.html", slug=slug, project=_project_or_404(slug or ""))
+    project = _project_or_404(slug or "")
+    participants = (
+        postgres.count_active_participants(project.slug)
+        if project and deploy.status_of(project.slug) == "running"
+        else 0
+    )
+    return _render(
+        request, "upload.html", slug=slug, project=project, participants=participants
+    )
 
 
 @app.post("/upload")
@@ -512,8 +522,17 @@ def project_page(request: Request, slug: str):
         sessions=postgres.list_sessions(slug),
         backups=_backups(slug),
         auth_levels=environment.AUTH_LEVELS,
+        incumbent_participants=_incumbent_participants(slug),
         **_overview(slug),
     )
+
+
+def _incumbent_participants(slug: str) -> int:
+    """Participants that activating ``slug`` would interrupt: the live project's."""
+    incumbent = deploy.active_slug()
+    if not incumbent or incumbent == slug or not systemd.is_active(incumbent):
+        return 0
+    return postgres.count_active_participants(incumbent)
 
 
 def _backups(slug: str) -> list[dict]:
@@ -612,6 +631,25 @@ def reset_db(slug: str, confirm: str = Form(default=""), force: bool = Form(defa
         return _back(slug, str(exc), error=True)
     where = f"; backup saved as {Path(snapshot).name}" if snapshot else ""
     return _back(slug, f"database reset{where}")
+
+
+@app.post("/p/{slug}/restore")
+def restore_backup(
+    slug: str,
+    backup: str = Form(default=""),
+    confirm: str = Form(default=""),
+    force: bool = Form(default=False),
+):
+    if confirm.strip() != slug:
+        return _back(slug, "type the project name exactly to confirm the restore", error=True)
+    try:
+        snapshot = deploy.restore_backup(slug, backup, force=force)
+    except ParticipantsActive as exc:
+        return _back(slug, str(exc), error=True)
+    except (DeployError, postgres.PostgresError) as exc:
+        return _back(slug, str(exc), error=True)
+    where = f"; the data it replaced was saved as {Path(snapshot).name}" if snapshot else ""
+    return _back(slug, f"restored {backup}{where}")
 
 
 @app.post("/p/{slug}/delete")

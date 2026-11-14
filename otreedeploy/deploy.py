@@ -267,6 +267,7 @@ def deploy(
             _run_resetdb(project, release_dir, log)
         else:
             log("Existing database kept — your collected data is untouched")
+            _reconcile_schema(project, release_dir, log)
 
         # 6. Smoke test ------------------------------------------------------------
         log("Starting a test copy on a private port to check it works…")
@@ -358,6 +359,48 @@ def _run_resetdb(project: Project, release_dir: Path, log: Callable[[str], None]
         raise DeployError(str(exc)) from exc
 
 
+class SchemaChangeRefused(DeployError):
+    pass
+
+
+def _reconcile_schema(project: Project, release_dir: Path, log: Callable[[str], None]) -> None:
+    """Make the existing database fit the new code, or refuse before anything goes live.
+
+    oTree has no migrations and its start-up never compares columns, so without this a
+    new model field deploys "successfully" and then fails for every participant.
+    """
+    log("Comparing the new code with the existing database…")
+    env = environment.subprocess_env(project, config.otree_port(), release_dir)
+    try:
+        report = sandbox.schema(project.slug, release_dir, env, "check", log)
+    except sandbox.SandboxError as exc:
+        raise DeployError(str(exc)) from exc
+
+    if report["blocking"]:
+        problems = "\n".join(f"  - {item}" for item in report["blocking"])
+        raise SchemaChangeRefused(
+            "this version changes the database in a way the data already collected "
+            f"cannot follow:\n{problems}\n\n"
+            "Nothing was changed. Either keep the old field definitions, or use "
+            "“Reset database” on the project page (a backup is taken first, and the "
+            "collected data is deleted), or upload this version as a new project."
+        )
+    for name in report["new_tables"]:
+        log(f"  new table {name} (created when it starts)")
+    for name in report["removed"]:
+        log(f"  {name} is no longer used by this version; its data is kept")
+    if not report["added"]:
+        log("  the database already fits this version")
+        return
+    try:
+        sandbox.schema(project.slug, release_dir, env, "apply", log)
+    except sandbox.SandboxError as exc:
+        raise DeployError(str(exc)) from exc
+    for change in report["added"]:
+        log(f"  added column {change['table']}.{change['column']} "
+            "(empty for rows collected before)")
+
+
 def _smoke_test(project: Project, release_dir: Path, log: Callable[[str], None]) -> None:
     """Boot the new code privately before letting it near port 80."""
     port = health.free_port(*config.EPHEMERAL_PORT_RANGE)
@@ -385,12 +428,28 @@ def _point_current_at(slug: str, release_dir: Path) -> None:
 
 
 def _restart_and_verify(slug: str) -> None:
-    systemd.restart(slug)
+    """Restart the project's unit and wait until *this project* serves on the live port.
+
+    Every way of failing raises DeployError -- including systemctl itself refusing,
+    which happens at once when the unit cannot even be executed -- so callers that roll
+    back on failure always get the chance to.
+    """
+    try:
+        systemd.restart(slug)
+    except systemd.SystemdError as exc:
+        raise DeployError(f"'{slug}' could not be started: {exc}") from exc
     if config.dry_run() and not config.dry_run_serves():
         return
-    if not health.wait_until_ready(config.otree_port()):
+    project = db.get_project(slug)
+    port = config.otree_port()
+    if project is None or not health.wait_for(
+        lambda: otreeapi.serves_project(port, project.rest_key)
+    ):
         raise DeployError(
-            f"the service did not respond on port {config.otree_port()} after restarting"
+            f"'{slug}' did not start serving on port {port} within "
+            f"{config.BOOT_TIMEOUT_SECONDS} seconds. Either the project fails while "
+            f"starting, or another program is using port {port}; its log on the project "
+            "page shows which."
         )
 
 
@@ -431,13 +490,34 @@ def activate(slug: str, force: bool = False) -> None:
         db.log_event("deactivate", f"stopped to make room for {slug}", incumbent)
 
     systemd.enable(slug)
-    _restart_and_verify(slug)
+    try:
+        _restart_and_verify(slug)
+    except DeployError as exc:
+        # Put things back as they were: nothing is worse than an experiment that was
+        # serving fine being stopped for one that cannot start.
+        systemd.stop(slug)
+        systemd.disable(slug)
+        db.log_event("activate_failed", str(exc), slug)
+        if not incumbent or incumbent == slug:
+            raise
+        systemd.enable(incumbent)
+        try:
+            _restart_and_verify(incumbent)
+        except DeployError:
+            raise DeployError(
+                f"{exc} Restarting '{incumbent}' failed as well, so nothing is serving on "
+                f"port {config.otree_port()} now."
+            ) from exc
+        db.log_event("activate", f"restored after '{slug}' failed to start", incumbent)
+        raise DeployError(f"{exc} '{incumbent}' is serving again, as before.") from exc
     db.log_event("activate", f"now serving on port {config.otree_port()}", slug)
 
 
 def stop(slug: str, force: bool = False) -> None:
     projects.validate(slug)
-    guard_disruption(slug, force)
+    # A unit that is not running interrupts nobody, so it needs no guard.
+    if systemd.is_active(slug):
+        guard_disruption(slug, force)
     systemd.stop(slug)
     systemd.disable(slug)
     db.log_event("stop", "stopped", slug)
@@ -445,7 +525,10 @@ def stop(slug: str, force: bool = False) -> None:
 
 def restart(slug: str, force: bool = False) -> None:
     projects.validate(slug)
-    guard_disruption(slug, force)
+    # Restarting a unit that is down (say, after PostgreSQL went away) interrupts
+    # nobody; refusing it would only keep the study down longer.
+    if systemd.is_active(slug):
+        guard_disruption(slug, force)
     _restart_and_verify(slug)
     db.log_event("restart", "restarted", slug)
 
@@ -507,6 +590,42 @@ def reset_database(slug: str, force: bool = False) -> Path | None:
             systemd.start(slug)
 
     db.log_event("reset_db", f"database reset (backup: {snapshot})", slug)
+    return snapshot
+
+
+def backup_path(slug: str, name: str) -> Path:
+    """A backup of this project by file name, refusing anything that is not one."""
+    directory = config.get_settings().backup_dir(slug)
+    candidate = directory / name
+    if "/" in name or not name.endswith(".sql.gz") or candidate.parent != directory \
+            or not candidate.is_file():
+        raise DeployError(f"there is no backup called '{name}' for '{slug}'")
+    return candidate
+
+
+def restore_backup(slug: str, name: str, force: bool = False) -> Path | None:
+    """Put a backup back in place of the current data. Takes a backup first, so the
+    restore itself can be undone the same way."""
+    projects.validate(slug)
+    if db.get_project(slug) is None:
+        raise DeployError(f"unknown project '{slug}'")
+    source = backup_path(slug, name)
+    guard_disruption(slug, force)
+
+    snapshot = backup(slug, "before-restore")
+    otreeapi.pool.release(slug)
+    was_running = systemd.is_active(slug)
+    try:
+        if config.dry_run() and was_running:
+            systemd.stop(slug)
+        sandbox.restore(slug, source)
+    except sandbox.SandboxError as exc:
+        raise DeployError(f"the backup was not restored: {exc}") from exc
+    finally:
+        # A real install stops and starts the service inside otree-ctl itself.
+        if config.dry_run() and was_running:
+            systemd.start(slug)
+    db.log_event("restore", f"restored {name} (previous data saved as {snapshot})", slug)
     return snapshot
 
 

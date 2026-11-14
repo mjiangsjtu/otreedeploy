@@ -25,10 +25,11 @@
       <form method="post" action="/p/{{ project.slug }}/activate">
         <button class="btn primary" {{ 'disabled' if not release }}>{{ t("Make this live on port {port}") }}</button>
       </form>
-      {% if participants %}
+      {% if incumbent_participants %}
+      {# The people interrupted by activating are the live project's, not this one's. #}
       <form method="post" action="/p/{{ project.slug }}/activate">
         <input type="hidden" name="force" value="true">
-        <button class="btn danger small">{{ t("Activate anyway") }}</button>
+        <button class="btn danger small">{{ t("Activate anyway, interrupting {n} participant(s) in {name}", n=incumbent_participants, name=active_slug) }}</button>
       </form>
       {% endif %}
     {% else %}
@@ -39,6 +40,16 @@
       <form method="post" action="/p/{{ project.slug }}/stop">
         <button class="btn">{{ t("Stop") }}</button>
       </form>
+      {% if participants %}
+      <form method="post" action="/p/{{ project.slug }}/restart">
+        <input type="hidden" name="force" value="true">
+        <button class="btn danger small">{{ t("Restart anyway") }}</button>
+      </form>
+      <form method="post" action="/p/{{ project.slug }}/stop">
+        <input type="hidden" name="force" value="true">
+        <button class="btn danger small">{{ t("Stop anyway") }}</button>
+      </form>
+      {% endif %}
     {% endif %}
 
     <a class="btn" href="/upload?slug={{ project.slug }}">{{ t("Upload new version") }}</a>
@@ -135,6 +146,13 @@
             <input type="hidden" name="release" value="{{ r.release }}">
             <button class="btn small">{{ t("Roll back to this") }}</button>
           </form>
+          {% if participants %}
+          <form method="post" action="/p/{{ project.slug }}/rollback">
+            <input type="hidden" name="release" value="{{ r.release }}">
+            <input type="hidden" name="force" value="true">
+            <button class="btn danger small">{{ t("Roll back anyway") }}</button>
+          </form>
+          {% endif %}
           {% endif %}
         </td>
       </tr>
@@ -167,6 +185,27 @@
           {{ t("Yes, even though {n} participant(s) are active", n=participants) }}</label>{% endif %}
         <button class="btn danger">{{ t("Reset database") }}</button>
       </form>
+
+      {% if backups %}
+      <form method="post" action="/p/{{ project.slug }}/restore"
+            onsubmit="return confirm({{ t('Replace all current data in {slug} with this backup?', slug=project.slug) | tojson }})">
+        <p><strong>{{ t("Restore a backup.") }}</strong>
+        {{ t("Replaces all current data with the backup you choose. The current data is backed up first, so this can be undone the same way.") }}</p>
+        <div class="field">
+          <label for="restoreBackup">{{ t("Backup") }}</label>
+          <select id="restoreBackup" name="backup">
+            {% for b in backups %}<option value="{{ b.name }}">{{ b.name }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="field">
+          <label for="confirmRestore">{{ t("Type {slug} to confirm", slug='<span class="mono">' ~ project.slug ~ '</span>') | safe }}</label>
+          <input type="text" id="confirmRestore" name="confirm" autocomplete="off">
+        </div>
+        {% if participants %}<label><input type="checkbox" name="force" value="true">
+          {{ t("Yes, even though {n} participant(s) are active", n=participants) }}</label>{% endif %}
+        <button class="btn danger">{{ t("Restore backup") }}</button>
+      </form>
+      {% endif %}
 
       <form method="post" action="/p/{{ project.slug }}/delete"
             onsubmit="return confirm({{ t('Permanently delete {slug}?', slug=project.slug) | tojson }})">

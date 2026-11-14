@@ -18,7 +18,7 @@ def client(root):
     db.init()
     from otreedeploy.app import app
 
-    with TestClient(app) as test_client:
+    with TestClient(app, headers={"Origin": "http://testserver"}) as test_client:
         yield test_client
     from otreedeploy import otreeapi
 
@@ -204,3 +204,50 @@ def test_reset_database_takes_a_backup(client):
     # And that backup is downloadable through the UI.
     got = client.get(f"/p/{slug}/backups/{backups[0].name}")
     assert got.status_code == 200
+
+
+def _forms(page: str, action: str) -> list[str]:
+    return [chunk.split("</form>")[0] for chunk in page.split("<form")[1:] if action in chunk]
+
+
+@pytest.mark.slow
+def test_every_blocked_action_offers_an_explicit_override(client, monkeypatch):
+    """The page promises an override for each blocked action (m2)."""
+    job_id = _upload(client, REAL_OTREEZIP, "study.otreezip").headers["location"].split("/")[-1]
+    assert _wait_for_job(job_id).status == "success"
+    deploy.activate("study")
+    monkeypatch.setattr(postgres, "count_active_participants", lambda slug, *a: 2)
+    monkeypatch.setattr(
+        postgres, "project_stats",
+        lambda slug, *a: postgres.Stats(has_tables=True, session_count=1, active_participants=2),
+    )
+    # A second release, so there is something to roll back to.
+    job_id = _upload(client, REAL_OTREEZIP, "study.otreezip", slug="study", force="true"
+                     ).headers["location"].split("/")[-1]
+    assert _wait_for_job(job_id).status == "success"
+
+    page = client.get("/p/study").text
+    for action in ("/p/study/stop", "/p/study/restart", "/p/study/rollback"):
+        assert any('name="force"' in form for form in _forms(page, action)), action
+    assert 'name="force"' in client.get("/upload?slug=study").text
+
+
+@pytest.mark.slow
+def test_activate_anyway_appears_for_the_live_projects_participants_not_this_ones(
+    client, monkeypatch
+):
+    for name in ("live", "next"):
+        job_id = _upload(client, REAL_OTREEZIP, f"{name}.otreezip").headers["location"].split("/")[-1]
+        assert _wait_for_job(job_id).status == "success"
+    deploy.activate("live")
+    active = {"live": 3, "next": 0}
+    monkeypatch.setattr(postgres, "count_active_participants",
+                        lambda slug, *a: active.get(slug, 0))
+
+    page = client.get("/p/next").text
+    assert any('name="force"' in form for form in _forms(page, "/p/next/activate"))
+    assert "3 participant(s) in live" in page
+
+    active["live"] = 0
+    page = client.get("/p/next").text
+    assert not any('name="force"' in form for form in _forms(page, "/p/next/activate"))

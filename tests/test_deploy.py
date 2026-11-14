@@ -226,3 +226,155 @@ def test_a_failed_live_restart_says_whether_participants_are_affected(
 
     assert config.get_settings().current_link(slug).resolve() == first
     assert job.live_down is (not rollback_works)
+
+
+@pytest.mark.slow
+def test_activating_a_project_that_cannot_start_gives_port_80_back_to_the_incumbent(
+    clean, monkeypatch
+):
+    incumbent = deploy.deploy(deploy.new_job("a"), REAL_OTREEZIP, "live.otreezip")
+    deploy.activate(incumbent)
+    broken = deploy.deploy(deploy.new_job("b"), REAL_OTREEZIP, "broken.otreezip")
+
+    def restart(slug):
+        systemd.restart(slug)
+        if slug == broken:
+            raise deploy.DeployError("did not start")
+
+    monkeypatch.setattr(deploy, "_restart_and_verify", restart)
+    with pytest.raises(deploy.DeployError, match="'live' is serving again"):
+        deploy.activate(broken)
+
+    assert deploy.active_slug() == incumbent
+    assert systemd.is_active(incumbent)
+    assert not systemd.is_enabled(broken) and not systemd.is_active(broken)
+
+
+@pytest.mark.slow
+def test_stopping_or_restarting_a_unit_that_is_not_running_needs_no_override(
+    clean, monkeypatch
+):
+    slug = deploy.deploy(deploy.new_job("a"), REAL_OTREEZIP, "study.otreezip")
+    monkeypatch.setattr(postgres, "count_active_participants", lambda slug: 3)
+    assert not systemd.is_active(slug)
+
+    # Nobody can be interrupted by (re)starting or stopping a study that is down.
+    deploy.restart(slug)
+    systemd.stop(slug)
+    deploy.stop(slug)
+
+    # Once it is running, the guard applies again.
+    systemd.start(slug)
+    with pytest.raises(deploy.ParticipantsActive):
+        deploy.restart(slug)
+
+
+@pytest.mark.slow
+def test_restoring_a_backup_brings_back_the_data_a_reset_removed(clean):
+    slug = deploy.deploy(deploy.new_job("a"), REAL_OTREEZIP, "study.otreezip")
+    code = create_session(slug)
+    snapshot = deploy.reset_database(slug, force=True)
+    assert [s.code for s in postgres.list_sessions(slug)] == []
+
+    before_restore = deploy.restore_backup(slug, snapshot.name)
+
+    assert [s.code for s in postgres.list_sessions(slug)] == [code]
+    assert before_restore is not None and "before-restore" in before_restore.name
+
+
+@pytest.mark.parametrize(
+    "name", ["../other/x.sql.gz", "x.sql.gz", "notabackup.txt", "", "/etc/passwd"]
+)
+def test_restore_only_accepts_this_projects_own_backups(clean, name):
+    db.create_project("study", "study")
+    other = config.get_settings().backup_dir("other")
+    other.mkdir(parents=True)
+    (other / "x.sql.gz").write_bytes(b"")
+    with pytest.raises(deploy.DeployError, match="no backup called"):
+        deploy.restore_backup("study", name)
+
+
+# ------------------------------------------------------------- schema changes (M1)
+
+
+def _session_participant_page(slug):
+    """Boot the current release and fetch a participant page of a fresh session."""
+    import httpx
+
+    from otreedeploy import otreeapi
+
+    code = create_session(slug)
+    project = db.get_project(slug)
+    instance = otreeapi.pool.acquire(project, deploy.current_release_dir(slug))
+    base = f"http://127.0.0.1:{instance.port}"
+    participants = httpx.get(f"{base}/api/sessions/{code}",
+                             headers={"otree-rest-key": project.rest_key}).json()["participants"]
+    page = httpx.get(f"{base}/InitializeParticipant/{participants[0]['code']}",
+                     follow_redirects=True, timeout=60)
+    otreeapi.pool.release(slug)
+    return page
+
+
+@pytest.mark.slow
+def test_a_new_model_field_is_added_to_the_existing_database_and_the_study_keeps_working(
+    clean, tmp_path
+):
+    from .e2e import projects as variants
+
+    slug = deploy.deploy(deploy.new_job("v1"), variants.labdemo(tmp_path / "v1"), "labdemo.otreezip")
+    create_session(slug)
+    job = deploy.new_job("v2")
+    deploy.deploy(job, variants.with_extra_field(tmp_path / "v2"), "labdemo.otreezip", slug=slug)
+
+    log = "\n".join(job.lines)
+    assert "added column simple_task_player.extra" in log
+    assert len(postgres.list_sessions(slug)) == 1, "the collected data must survive"
+    assert _session_participant_page(slug).status_code == 200
+
+
+@pytest.mark.slow
+def test_a_field_whose_type_changes_is_refused_before_anything_goes_live(clean, tmp_path):
+    from .e2e import projects as variants
+
+    slug = deploy.deploy(deploy.new_job("v1"), variants.labdemo(tmp_path / "v1"), "labdemo.otreezip")
+    deploy.activate(slug)
+    create_session(slug)
+    before = config.get_settings().current_link(slug).resolve()
+
+    with pytest.raises(deploy.SchemaChangeRefused, match="simple_task_player.answer changes from integer to text"):
+        deploy.deploy(deploy.new_job("v2"), variants.with_changed_field_type(tmp_path / "v2"),
+                      "labdemo.otreezip", slug=slug)
+
+    assert config.get_settings().current_link(slug).resolve() == before
+    assert systemd.is_active(slug)
+    assert len(postgres.list_sessions(slug)) == 1
+
+
+@pytest.mark.slow
+def test_redeploying_unchanged_models_reports_that_the_database_already_fits(clean, tmp_path):
+    from .e2e import projects as variants
+
+    slug = deploy.deploy(deploy.new_job("v1"), variants.labdemo(tmp_path / "v1"), "labdemo.otreezip")
+    job = deploy.new_job("v2")
+    deploy.deploy(job, variants.labdemo(tmp_path / "v2"), "labdemo.otreezip", slug=slug)
+    assert "the database already fits this version" in "\n".join(job.lines)
+
+
+@pytest.mark.slow
+def test_a_unit_that_systemd_refuses_to_start_still_gives_port_80_back(clean, monkeypatch):
+    """systemctl fails immediately when the unit cannot even be executed; that must
+    trigger the same rollback as a unit that starts but never answers."""
+    incumbent = deploy.deploy(deploy.new_job("a"), REAL_OTREEZIP, "live.otreezip")
+    deploy.activate(incumbent)
+    broken = deploy.deploy(deploy.new_job("b"), REAL_OTREEZIP, "broken.otreezip")
+    real_restart = systemd.restart
+
+    def restart(slug):
+        if slug == broken:
+            raise systemd.SystemdError("Job for otree@broken.service failed")
+        real_restart(slug)
+
+    monkeypatch.setattr(systemd, "restart", restart)
+    with pytest.raises(deploy.DeployError, match="'live' is serving again"):
+        deploy.activate(broken)
+    assert deploy.active_slug() == incumbent and systemd.is_active(incumbent)

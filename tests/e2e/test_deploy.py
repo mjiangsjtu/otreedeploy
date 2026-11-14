@@ -34,7 +34,6 @@ def test_a_build_that_fails_leaves_the_live_study_serving_the_old_release(
     assert experiment.open_as_participant(participant).status_code == 200
 
 
-@pytest.mark.xfail(strict=True, reason="M1: the smoke test cannot see a schema change")
 def test_adding_a_model_field_never_publishes_a_release_that_errors_for_participants(
     server, manager, workdir
 ):
@@ -66,7 +65,6 @@ def test_adding_an_app_to_a_live_project_still_lets_sessions_be_created(
     assert response.status_code == 200, response.text[:2000]
 
 
-@pytest.mark.xfail(strict=True, reason="m4: a failed activation leaves nothing serving")
 def test_activating_a_project_that_cannot_start_keeps_the_previous_one_live(
     server, manager, workdir
 ):
@@ -86,7 +84,6 @@ def test_activating_a_project_that_cannot_start_keeps_the_previous_one_live(
     assert experiment.open_as_participant(participant).status_code == 200
 
 
-@pytest.mark.xfail(strict=True, reason="m4: the restart probe accepts any server on port 80")
 def test_a_restart_is_not_reported_successful_when_another_server_holds_the_port(
     server, manager, workdir
 ):
@@ -111,3 +108,18 @@ def test_only_five_releases_are_kept(server, manager, workdir):
     assert len(releases) == 5
     current = server.sh("readlink -f /srv/otree/labdemo/current").out.strip()
     assert current.rsplit("/", 1)[-1] == max(releases)
+
+
+def test_a_field_whose_type_changes_is_refused_and_the_live_study_is_untouched(
+    server, manager, workdir
+):
+    experiment, codes = deploy_live(server, manager, projects.labdemo(workdir), sessions=1)
+    before = server.sh("readlink /srv/otree/labdemo/current").out.strip()
+
+    job = manager.upload(projects.with_changed_field_type(workdir / "v2"), slug="labdemo")
+
+    assert job.status == "failed"
+    assert "changes from integer to text" in job.log
+    assert server.sh("readlink /srv/otree/labdemo/current").out.strip() == before
+    participant = experiment.participant_codes(codes[0])[0]
+    assert experiment.open_as_participant(participant).status_code == 200

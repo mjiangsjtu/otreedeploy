@@ -142,7 +142,7 @@ def test_the_landing_page_names_the_configured_port(root, monkeypatch):
 
     from otreedeploy.app import app
 
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Origin": "http://testserver"}) as client:
         body = client.get("/").text
     assert "port 8080" in body
     assert "port 80." not in body
@@ -155,7 +155,7 @@ def test_the_project_page_links_to_the_port_that_is_really_serving(served):
 
     from otreedeploy.app import app
 
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Origin": "http://testserver"}) as client:
         job = deploy.new_job("serve")
         slug = deploy.deploy(job, REAL_OTREEZIP, "study.otreezip")
         deploy.activate(slug)
