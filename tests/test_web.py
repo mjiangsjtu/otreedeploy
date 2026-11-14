@@ -253,14 +253,21 @@ def test_activate_anyway_appears_for_the_live_projects_participants_not_this_one
     assert not any('name="force"' in form for form in _forms(page, "/p/next/activate"))
 
 
-def test_the_participant_address_is_escaped_even_if_the_host_header_is_not(client):
-    """N7: the address is built from the request's Host header and shown on the page."""
+@pytest.mark.slow
+def test_the_participant_address_is_shown_as_an_address_and_escaped(client, monkeypatch):
+    """N7, on the real page: the address is built from the Host header, so it must be
+    escaped -- without escaping the markup around it (a first fix did exactly that)."""
+    job_id = _upload(client, REAL_OTREEZIP, "study.otreezip").headers["location"].split("/")[-1]
+    assert _wait_for_job(job_id).status == "success"
+    deploy.activate("study")
+
+    page = client.get("/p/study").text
+    assert '<span class="mono">http://testserver/</span>' in page
+
     from otreedeploy import app as app_module
 
-    class FakeURL:
-        hostname = '"><script>alert(1)</script>'
-
-    origin = app_module._experiment_origin(type("R", (), {"url": FakeURL()})())
-    rendered = app_module.templates.env.from_string(
-        "{{ ('<span>' ~ (o | e) ~ '</span>') | safe }}").render(o=origin)
-    assert "<script>" not in rendered and "&lt;script&gt;" in rendered
+    monkeypatch.setitem(app_module.templates.env.globals, "experiment_origin",
+                        lambda request: 'http://"><b>x/')
+    page = client.get("/p/study").text
+    assert '<span class="mono">http://&quot;&gt;&lt;b&gt;x/</span>' in page
+    assert "<b>x" not in page

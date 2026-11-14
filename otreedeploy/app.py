@@ -14,6 +14,7 @@ import hashlib
 import hmac
 import secrets
 import contextvars
+import html
 import shutil
 import tempfile
 import threading
@@ -124,6 +125,9 @@ def _experiment_origin(request) -> str:
 # hardcode it -- a page that names the wrong port sends people to a refused connection.
 templates.env.globals["otree_port"] = config.otree_port
 templates.env.globals["experiment_origin"] = _experiment_origin
+# For a value placed inside markup that is then marked safe (N7). Jinja's own `|e`
+# returns Markup, and concatenating with Markup escapes the surrounding tags too.
+templates.env.globals["html_escape"] = lambda value: html.escape(str(value), quote=True)
 templates.env.globals["min_password_length"] = auth.MIN_PASSWORD_LENGTH
 
 
