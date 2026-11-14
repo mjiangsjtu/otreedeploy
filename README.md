@@ -441,6 +441,7 @@ download the resulting CSV.
 | Forgotten a password | An admin sets a new one on the Users page; for the admin, `sudo -u otreedeploy /opt/otreedeploy/.venv/bin/otreedeploy-users passwd admin` |
 | "Too many attempts" | Five wrong guesses lock that name on that machine out, for longer each time. Wait, or set a new password as above |
 | Every page returns 503 | No account exists yet, or an old `auth.json` could not be migrated. The page says which; create an account with `otreedeploy-users add admin --admin` |
+| Each release directory contains an empty `db.sqlite3` | Harmless: oTree creates it whenever it is imported. Your data is in PostgreSQL (`DATABASE_URL` is always set); see *How it is put together* |
 
 Backups are plain gzipped `pg_dump` files in `/var/lib/otreedeploy/backups/<slug>/`, and
 also downloadable from the project page. To put one back, use **Restore a backup** in the

@@ -60,7 +60,7 @@
 
   {% if is_active %}
   <p class="hint" style="margin-top:12px">
-    {{ t("Participants use {url}.", url='<span class="mono">' ~ experiment_origin(request) ~ '</span>') | safe }}
+    {{ t("Participants use {url}.", url='<span class="mono">' ~ (experiment_origin(request) | e) ~ '</span>') | safe }}
     {{ t("The oTree admin username is {user}; the password is below.", user='<span class="mono">admin</span>') | safe }}
   </p>
   {% endif %}

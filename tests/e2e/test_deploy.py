@@ -35,11 +35,13 @@ def test_a_build_that_fails_leaves_the_live_study_serving_the_old_release(
 
 
 def test_adding_a_model_field_never_publishes_a_release_that_errors_for_participants(
-    server, manager, workdir
+    server, manager, workdir, metrics
 ):
-    experiment, codes = deploy_live(server, manager, projects.labdemo(workdir), sessions=1)
+    experiment, codes = deploy_live(server, manager, projects.labdemo(workdir),
+                                    metrics=metrics, sessions=1)
 
     job = manager.upload(projects.with_extra_field(workdir / "v2"), slug="labdemo")
+    metrics.time("redeploy_live_with_new_field_seconds", job.seconds)
 
     # Either outcome is acceptable: the change is applied, or it is refused before going
     # live. What must not happen is "Finished successfully" and then HTTP 500.
@@ -123,3 +125,20 @@ def test_a_field_whose_type_changes_is_refused_and_the_live_study_is_untouched(
     assert server.sh("readlink /srv/otree/labdemo/current").out.strip() == before
     participant = experiment.participant_codes(codes[0])[0]
     assert experiment.open_as_participant(participant).status_code == 200
+
+
+def test_two_simultaneous_uploads_to_one_project_do_not_interleave(server, manager, workdir):
+    """m6: previously the second ended in a raw IntegrityError, or both went live."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    deploy_live(server, manager, projects.labdemo(workdir))
+    archive = projects.labdemo(workdir / "again")
+    clients = [server.manager().login(), server.manager().login()]
+    with ThreadPoolExecutor(2) as pool:
+        jobs = list(pool.map(lambda c: c.upload(archive, slug="labdemo"), clients))
+
+    statuses = sorted(job.status for job in jobs)
+    assert statuses == ["failed", "success"], [j.log[-500:] for j in jobs]
+    refused = next(job for job in jobs if job.status == "failed")
+    assert "already being done to 'labdemo'" in refused.log
+    assert "IntegrityError" not in refused.log

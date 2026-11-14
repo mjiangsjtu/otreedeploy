@@ -114,6 +114,33 @@ def build_venv(release_dir: Path, log: Logger, uv: str = "uv") -> None:
     )
 
 
+def installed_packages(release_dir: Path) -> list[str]:
+    """Every package in the release's venv as ``name==version``, from metadata files.
+
+    Kept beside the verbatim upload, so that a study can be rebuilt months later with
+    exactly the versions it ran with, not whatever its requirements.txt resolves to
+    by then (R2 P9). Read from the ``*.dist-info`` directories, never by running the
+    venv's Python: that is the project's own code (see ``otree_version``).
+    """
+    found = set()
+    for dist in release_dir.glob(".venv/lib/python*/site-packages/*.dist-info"):
+        name = version = None
+        try:
+            with open(dist / "METADATA", encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    if line.startswith("Name:"):
+                        name = line.split(":", 1)[1].strip()
+                    elif line.startswith("Version:"):
+                        version = line.split(":", 1)[1].strip()
+                    elif not line.strip():
+                        break
+        except OSError:
+            continue
+        if name and version:
+            found.add(f"{name}=={version}")
+    return sorted(found, key=str.lower)
+
+
 def otree_version(release_dir: Path) -> str | None:
     """Read the oTree version installed in the release's venv, from package metadata.
 

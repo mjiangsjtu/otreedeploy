@@ -43,7 +43,10 @@ CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 Restart=always
 RestartSec=3
 # Default KillMode=control-group reaps the timeout worker along with the server.
-TimeoutStopSec=30
+# A participant's open page keeps a websocket open, and oTree's server waits for those
+# before exiting. 30 seconds meant half a minute of downtime on most restarts during
+# fieldwork (N3); after 10 the remaining connections are cut, and the pages reconnect.
+TimeoutStopSec=10
 
 # This runs experimenter-supplied Python. Keep it away from everything it does not need.
 NoNewPrivileges=true

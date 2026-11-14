@@ -59,3 +59,19 @@ def test_the_project_page_offers_an_explicit_override_when_stop_is_blocked(
 
     stop_forms = [chunk for chunk in page.split("<form")[1:] if "/p/labdemo/stop" in chunk]
     assert any('name="force"' in form for form in stop_forms)
+
+
+def test_an_admin_password_with_special_characters_reaches_otree_unchanged(server, manager, workdir):
+    """m9: systemd's EnvironmentFile parser must read back exactly what was saved."""
+    deploy_live(server, manager, projects.labdemo(workdir))
+    password = 'a"b\\c$HOME`x` d'
+    manager.post("/p/labdemo/settings", display_name="labdemo", admin_password=password,
+                 auth_level="STUDY").assert_ok()
+
+    pid = server.sh("systemctl show -p MainPID --value otree@labdemo").out.strip()
+    environ = server.sh(f"tr '\\0' '\\n' < /proc/{pid}/environ").out.splitlines()
+    assert f"OTREE_ADMIN_PASSWORD={password}" in environ
+
+    refused = manager.post("/p/labdemo/settings", display_name="labdemo",
+                           admin_password="x\nDATABASE_URL=sqlite://", auth_level="STUDY")
+    assert refused.error

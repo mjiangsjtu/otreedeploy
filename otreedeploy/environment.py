@@ -31,10 +31,29 @@ def build(project: Project, port: int | None = None) -> dict[str, str]:
     }
 
 
+class UnsafeValue(ValueError):
+    pass
+
+
+def _quote(value: str) -> str:
+    """A value as systemd's EnvironmentFile parser will read it back unchanged (m9).
+
+    Inside double quotes it gives backslash, double quote, dollar and backtick a meaning
+    of their own, so those are escaped; a line break would end the value and start a
+    new variable -- a DATABASE_URL of the user's choosing, say -- so control characters
+    are refused outright rather than escaped.
+    """
+    if any(ord(c) < 32 or ord(c) == 127 for c in value):
+        raise UnsafeValue("values cannot contain line breaks or other control characters")
+    for char in ("\\", '"', "$", "`"):
+        value = value.replace(char, "\\" + char)
+    return f'"{value}"'
+
+
 def render(values: dict[str, str]) -> str:
     # systemd splits on the first '=' and strips surrounding double quotes, so quoting
     # keeps values such as the DATABASE_URL query string unambiguous.
-    return "".join(f'{key}="{value}"\n' for key, value in sorted(values.items()))
+    return "".join(f"{key}={_quote(value)}\n" for key, value in sorted(values.items()))
 
 
 def write(project: Project, port: int | None = None) -> Path:

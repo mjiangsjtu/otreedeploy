@@ -38,6 +38,11 @@ PROBE_PATH = "/favicon.ico"
 # A participant that has hit the server within this window counts as "currently active",
 # which is what blocks a disruptive action.
 PARTICIPANT_ACTIVE_SECONDS = 120
+# oTree only records a participant's time when they load a page, so somebody reading
+# a long instructions page, or waiting for others, goes quiet. A participant part-way
+# through a session who acted within this window also counts as active; somebody who
+# abandoned a session stops counting once it passes.
+PARTICIPANT_IN_PROGRESS_SECONDS = 30 * 60
 
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024
 KEEP_RELEASES = 5

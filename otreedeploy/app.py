@@ -154,7 +154,10 @@ async def _lifespan(_: FastAPI):
         accounts.init()
     except accounts.AccountError:
         pass  # reported on every request by access.EnforceAccess, which stays locked
-    retention.start_sweeper()
+    if not config.dry_run():
+        # A dry run sweeps when the setting is saved; a background thread there would
+        # outlive the temporary roots the tests point it at.
+        retention.start_sweeper()
     # Private boots (smoke tests, exports) are transient units, not our children: a
     # crash or restart of this app would otherwise leave them holding ports.
     sandbox.unboot_all()
@@ -718,6 +721,9 @@ def update_settings(
         return _back(slug, f"unknown access level '{auth_level}'", error=True)
     if not admin_password.strip():
         return _back(slug, "the admin password cannot be empty", error=True)
+    if any(ord(c) < 32 or ord(c) == 127 for c in admin_password + display_name):
+        return _back(slug, "the settings cannot contain line breaks or control characters",
+                     error=True)
 
     db.update_project(
         slug,

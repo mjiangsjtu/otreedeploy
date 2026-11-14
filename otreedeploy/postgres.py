@@ -41,10 +41,20 @@ SESSION_QUERY = (
     f"SELECT code, label, num_participants, _created FROM {SESSION_TABLE} "
     "ORDER BY _created DESC"
 )
-ACTIVE_QUERY = (
-    f"SELECT count(*) FROM {PARTICIPANT_TABLE} "
-    "WHERE _last_request_timestamp IS NOT NULL AND _last_request_timestamp > "
-)
+def _active_query(window: int, now: int | None = None) -> str:
+    """Participants an interruption would hurt (see config.PARTICIPANT_*_SECONDS):
+    loaded a page within ``window``, or part-way through the session and seen within
+    the longer in-progress window. Only integers are interpolated."""
+    now = int(time.time()) if now is None else now
+    recent = now - int(window)
+    in_progress = now - int(config.PARTICIPANT_IN_PROGRESS_SECONDS)
+    return (
+        f"SELECT count(*) FROM {PARTICIPANT_TABLE} "
+        "WHERE _last_request_timestamp IS NOT NULL AND ("
+        f"_last_request_timestamp > {recent} OR ("
+        "_index_in_pages > 0 AND _index_in_pages <= _max_page_index "
+        f"AND _last_request_timestamp > {in_progress}))"
+    )
 
 
 class PostgresError(Exception):
@@ -209,12 +219,11 @@ def project_stats(slug: str, window: int = config.PARTICIPANT_ACTIVE_SECONDS) ->
     empty = Stats(has_tables=False, session_count=0, active_participants=0)
     if not has_otree_tables(slug):
         return empty
-    cutoff = int(time.time()) - window
     count_sessions = f"SELECT count(*) FROM {SESSION_TABLE}"
 
     if config.dry_run():
         sessions = _sqlite_query(slug, count_sessions)
-        active = _sqlite_query(slug, ACTIVE_QUERY + str(cutoff))
+        active = _sqlite_query(slug, _active_query(window))
         return Stats(
             has_tables=True,
             session_count=int(sessions[0][0]) if sessions else 0,
@@ -224,7 +233,7 @@ def project_stats(slug: str, window: int = config.PARTICIPANT_ACTIVE_SECONDS) ->
     try:
         with _connect(db_name(slug)) as conn:
             sessions = conn.execute(count_sessions).fetchone()
-            active = conn.execute(ACTIVE_QUERY + "%s", (cutoff,)).fetchone()
+            active = conn.execute(_active_query(window)).fetchone()
     except PostgresError:
         return empty
     return Stats(
@@ -237,21 +246,18 @@ def project_stats(slug: str, window: int = config.PARTICIPANT_ACTIVE_SECONDS) ->
 def count_active_participants(
     slug: str, window: int = config.PARTICIPANT_ACTIVE_SECONDS
 ) -> int:
-    """Participants who hit the server recently -- the signal that a study is live.
+    """Participants an interruption would hurt -- the signal that a study is live.
 
-    This is what stands between a careless click and a ruined session.
+    This is what stands between a careless click and a ruined session, so it fails
+    closed: if the database cannot be asked, that is an error, never "nobody" (N1).
     """
     if not has_otree_tables(slug):
         return 0
-    cutoff = int(time.time()) - window
     if config.dry_run():
-        rows = _sqlite_query(slug, ACTIVE_QUERY + str(cutoff))
+        rows = _sqlite_query(slug, _active_query(window))
         return int(rows[0][0]) if rows else 0
-    try:
-        with _connect(db_name(slug)) as conn:
-            row = conn.execute(ACTIVE_QUERY + "%s", (cutoff,)).fetchone()
-    except PostgresError:
-        return 0
+    with _connect(db_name(slug)) as conn:
+        row = conn.execute(_active_query(window)).fetchone()
     return int(row[0]) if row else 0
 
 

@@ -15,6 +15,7 @@ vet every member ourselves and extract by hand rather than trusting ``extractall
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import posixpath
 import tarfile
@@ -146,6 +147,18 @@ def inspect(archive_path: Path) -> Inspection:
     try:
         with tarfile.open(archive_path, mode="r:gz") as tar:
             entries = _vet(tar)
+            end = tar.offset
+        # A tar archive ends with two empty 512-byte blocks. Python's tarfile accepts an
+        # archive without them, so one cut off exactly between two files would pass
+        # with the later files silently missing (N5). gzip's own checksum does not
+        # catch it if the truncated tar was compressed again.
+        with gzip.open(archive_path, "rb") as stream:
+            stream.seek(end)
+            marker = stream.read(1024)
+        if len(marker) < 1024 or any(marker):
+            raise ArchiveError(
+                "the uploaded file is incomplete: it stops before the end of the archive"
+            )
     except tarfile.ReadError as exc:
         raise ArchiveError(
             "could not read this file as an .otreezip (expected a gzipped tar archive). "
@@ -173,6 +186,18 @@ def inspect(archive_path: Path) -> Inspection:
             Entry(path=path, is_dir=entry.is_dir, size=entry.size, mode=entry.mode)
         )
 
+    # "a" as a file and "a/b" inside it cannot both exist on disk. Refused here, in
+    # words, rather than failing halfway through extraction (N5).
+    files = {e.path for e in rebased if not e.is_dir}
+    for entry in rebased:
+        parts = entry.path.split("/")
+        for depth in range(1, len(parts)):
+            parent = "/".join(parts[:depth])
+            if parent in files:
+                raise ArchiveError(
+                    f"'{parent}' is both a file and a folder in the archive"
+                )
+
     return Inspection(
         entries=rebased,
         prefix=prefix,
@@ -197,6 +222,14 @@ def extract(archive_path: Path, dest: Path) -> Inspection:
     wanted = {e.path: e for e in inspection.entries}
     prefix = inspection.prefix
 
+    try:
+        _extract_members(archive_path, dest, wanted, prefix)
+    except OSError as exc:
+        raise ArchiveError(f"the archive could not be unpacked: {exc}") from exc
+    return inspection
+
+
+def _extract_members(archive_path: Path, dest: Path, wanted: dict, prefix: str | None) -> None:
     with tarfile.open(archive_path, mode="r:gz") as tar:
         for member in tar:
             raw = _sanitize(member.name)
@@ -229,8 +262,6 @@ def extract(archive_path: Path, dest: Path) -> Inspection:
                     fh.write(chunk)
             # Preserve the executable bit, force-readable, never setuid.
             target.chmod(0o755 if entry.mode & 0o100 else 0o644)
-
-    return inspection
 
 
 def _within(root: Path, candidate: Path) -> bool:

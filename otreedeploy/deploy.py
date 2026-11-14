@@ -7,6 +7,8 @@ unless explicitly forced, and take a database backup before anything destructive
 
 from __future__ import annotations
 
+import contextlib
+import functools
 import queue
 import shutil
 import threading
@@ -180,8 +182,67 @@ def backup(slug: str, reason: str) -> Path | None:
 # ------------------------------------------------------------------------------ deploy
 
 
-def _new_release_name() -> str:
-    return time.strftime("%Y%m%d-%H%M%S")
+def _new_release_name(slug: str) -> str:
+    """A timestamp, with a suffix if this second is already taken (m6).
+
+    The suffix sorts after the plain name and before the next second, so releases
+    still sort in the order they were made.
+    """
+    base = time.strftime("%Y%m%d-%H%M%S")
+    candidate, n = base, 1
+    while (config.get_settings().release_dir(slug, candidate).exists()
+           or db.get_release(slug, candidate) is not None):
+        candidate = f"{base}-{n}"
+        n += 1
+    return candidate
+
+
+# ------------------------------------------------------------------------- one at a time
+
+
+class Busy(DeployError):
+    """Another action on the same project is still running."""
+
+
+_locks: dict[str, threading.Lock] = {}
+_locks_guard = threading.Lock()
+
+
+@contextlib.contextmanager
+def _exclusive(*slugs: str | None):
+    """Hold the projects' locks for the duration, or refuse at once (m6).
+
+    Two deploys, a deploy and a reset, or a reset and a restore of the same project
+    would otherwise interleave -- both repointing `current`, both restarting the
+    service. Refusing is better than queueing: the second person is told why instead
+    of waiting on a page that seems to hang. Locks are taken in a fixed order, so two
+    actions that each need two projects cannot deadlock.
+    """
+    held: list[threading.Lock] = []
+    try:
+        for name in sorted({s for s in slugs if s}):
+            with _locks_guard:
+                lock = _locks.setdefault(name, threading.Lock())
+            if not lock.acquire(blocking=False):
+                raise Busy(
+                    f"something else is already being done to '{name}' -- a deploy, "
+                    "reset or restore, perhaps by a colleague. Try again once it has "
+                    "finished."
+                )
+            held.append(lock)
+        yield
+    finally:
+        for lock in reversed(held):
+            lock.release()
+
+
+def _one_at_a_time(func):
+    @functools.wraps(func)
+    def wrapper(slug, *args, **kwargs):
+        with _exclusive(slug):
+            return func(slug, *args, **kwargs)
+
+    return wrapper
 
 
 def deploy(
@@ -192,14 +253,20 @@ def deploy(
     force: bool = False,
 ) -> str:
     """Run the whole pipeline. Returns the slug. Raises DeployError on failure."""
+    if slug is None:
+        existing = {p.slug for p in db.list_projects()}
+        desired = projects.slugify(filename)
+        slug = desired if desired in existing else projects.unique_slug(desired, existing)
+    with _exclusive(slug):
+        return _deploy(job, archive_path, filename, slug, force)
+
+
+def _deploy(job: Job, archive_path: Path, filename: str, slug: str, force: bool) -> str:
     settings = config.get_settings()
     log = job.log
 
     # 1. Identify the project ------------------------------------------------------
     existing = {p.slug for p in db.list_projects()}
-    if slug is None:
-        desired = projects.slugify(filename)
-        slug = desired if desired in existing else projects.unique_slug(desired, existing)
     projects.validate(slug)
     job.slug = slug
 
@@ -231,7 +298,7 @@ def deploy(
     if not config.dry_run():
         log(f"Project runs as its own user: {projects.project_user(slug)}")
 
-    release = _new_release_name()
+    release = _new_release_name(slug)
     release_dir = settings.release_dir(slug, release)
 
     project = db.get_project(slug) or db.create_project(slug, _display_name(filename))
@@ -257,6 +324,14 @@ def deploy(
         log("Building the virtualenv with uv…")
         sandbox.build(slug, release_dir, log)
         version = builder.otree_version(release_dir)
+        packages = builder.installed_packages(release_dir)
+        lock = upload_copy.with_suffix(".packages.txt")
+        lock.write_text(
+            f"# Exactly what release {release} of {slug} was built with.\n"
+            "# To rebuild it this way, use this file as the project's requirements.txt.\n"
+            + "".join(f"{p}\n" for p in packages)
+        )
+        log(f"  recorded the {len(packages)} installed packages beside the upload")
         log(f"  oTree {version or 'version unknown'}")
 
         # 5. Database and environment ----------------------------------------------
@@ -483,6 +558,11 @@ def activate(slug: str, force: bool = False) -> None:
         raise DeployError(f"'{slug}' has no successful deploy to activate")
 
     incumbent = active_slug()
+    with _exclusive(slug, incumbent):
+        _activate(slug, incumbent, force)
+
+
+def _activate(slug: str, incumbent: str | None, force: bool) -> None:
     if incumbent == slug and systemd.is_active(slug):
         return
     if incumbent and incumbent != slug:
@@ -515,6 +595,7 @@ def activate(slug: str, force: bool = False) -> None:
     db.log_event("activate", f"now serving on port {config.otree_port()}", slug)
 
 
+@_one_at_a_time
 def stop(slug: str, force: bool = False) -> None:
     projects.validate(slug)
     # A unit that is not running interrupts nobody, so it needs no guard.
@@ -525,6 +606,7 @@ def stop(slug: str, force: bool = False) -> None:
     db.log_event("stop", "stopped", slug)
 
 
+@_one_at_a_time
 def restart(slug: str, force: bool = False) -> None:
     projects.validate(slug)
     # Restarting a unit that is down (say, after PostgreSQL went away) interrupts
@@ -535,6 +617,7 @@ def restart(slug: str, force: bool = False) -> None:
     db.log_event("restart", "restarted", slug)
 
 
+@_one_at_a_time
 def rollback(slug: str, release: str, force: bool = False) -> None:
     projects.validate(slug)
     # `release` arrives from a form. Only a name this project itself recorded as a
@@ -556,6 +639,7 @@ def rollback(slug: str, release: str, force: bool = False) -> None:
     db.log_event("rollback", f"rolled back to {release}", slug)
 
 
+@_one_at_a_time
 def reset_database(slug: str, force: bool = False) -> Path | None:
     """Wipe and recreate the schema. Always takes a backup first."""
     project = db.get_project(slug)
@@ -605,6 +689,7 @@ def backup_path(slug: str, name: str) -> Path:
     return candidate
 
 
+@_one_at_a_time
 def restore_backup(slug: str, name: str, force: bool = False) -> Path | None:
     """Put a backup back in place of the current data. Takes a backup first, so the
     restore itself can be undone the same way."""
@@ -631,6 +716,7 @@ def restore_backup(slug: str, name: str, force: bool = False) -> Path | None:
     return snapshot
 
 
+@_one_at_a_time
 def delete_project(slug: str, force: bool = False, purge: bool = False) -> Path | None:
     """Remove a project entirely.
 

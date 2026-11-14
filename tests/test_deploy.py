@@ -378,3 +378,102 @@ def test_a_unit_that_systemd_refuses_to_start_still_gives_port_80_back(clean, mo
     with pytest.raises(deploy.DeployError, match="'live' is serving again"):
         deploy.activate(broken)
     assert deploy.active_slug() == incumbent and systemd.is_active(incumbent)
+
+
+# --------------------------------------------------------------- one at a time (m6)
+
+
+def test_a_second_action_on_a_busy_project_is_refused_not_interleaved(clean):
+    db.create_project("study", "study")
+    with deploy._exclusive("study"):
+        with pytest.raises(deploy.Busy, match="already being done to 'study'"):
+            deploy.reset_database("study")
+        with pytest.raises(deploy.Busy):
+            deploy.delete_project("study")
+        # Another project is not held up.
+        with deploy._exclusive("other"):
+            pass
+    # Released afterwards, also after an error inside.
+    with pytest.raises(RuntimeError):
+        with deploy._exclusive("study"):
+            raise RuntimeError
+    with deploy._exclusive("study"):
+        pass
+
+
+def test_two_releases_in_the_same_second_get_different_names(clean, monkeypatch):
+    db.create_project("study", "study")
+    monkeypatch.setattr(deploy.time, "strftime", lambda fmt, *a: "20261114-120000")
+    first = deploy._new_release_name("study")
+    config.get_settings().release_dir("study", first).mkdir(parents=True)
+    second = deploy._new_release_name("study")
+    config.get_settings().release_dir("study", second).mkdir(parents=True)
+    third = deploy._new_release_name("study")
+    assert [first, second, third] == ["20261114-120000", "20261114-120000-1", "20261114-120000-2"]
+    assert sorted([third, first, second]) == [first, second, third]
+
+
+# ----------------------------------------------------------- who is active (m3)
+
+
+def _participants_db(slug, rows):
+    """A minimal oTree schema with participants at given progress and last-seen times."""
+    import sqlite3
+
+    path = postgres._sqlite_path(slug)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE otree_session (code TEXT)")
+    conn.execute("CREATE TABLE otree_participant (_index_in_pages INT, _max_page_index INT, "
+                 "_last_request_timestamp INT)")
+    conn.executemany("INSERT INTO otree_participant VALUES (?, ?, ?)", rows)
+    conn.commit()
+    conn.close()
+
+
+def test_a_participant_reading_a_long_page_still_counts_as_active(clean):
+    import time as _time
+
+    now = int(_time.time())
+    _participants_db("study", [
+        (3, 6, now - 30),        # just loaded a page
+        (3, 6, now - 5 * 60),    # five minutes on an instructions page
+        (6, 6, now - 10 * 60),   # waiting on the last page
+        (7, 6, now - 5 * 60),    # finished
+        (0, 6, now - 5 * 60),    # never started
+        (2, 6, now - 3 * 3600),  # abandoned hours ago
+        (1, 6, None),            # never seen
+    ])
+    assert postgres.count_active_participants("study") == 3
+
+
+@pytest.mark.slow
+def test_each_release_records_exactly_which_package_versions_it_was_built_with(clean):
+    slug = deploy.deploy(deploy.new_job("a"), REAL_OTREEZIP, "study.otreezip")
+    release = db.list_releases(slug)[0].release
+    lock = config.get_settings().upload_dir(slug) / f"{release}.packages.txt"
+    lines = [l for l in lock.read_text().splitlines() if not l.startswith("#")]
+    assert "otree==6.0.15" in lines
+    assert all("==" in l for l in lines) and len(lines) > 10
+
+
+@pytest.mark.parametrize("value", ['plain', 'with "quotes"', "back\\slash", "dollar $HOME", "tick `x`"])
+def test_environment_values_are_written_so_systemd_reads_them_back_unchanged(value):
+    """m9: the unit's EnvironmentFile and our own boots must see the same password."""
+    from otreedeploy import environment
+
+    line = environment.render({"OTREE_ADMIN_PASSWORD": value})
+    assert line.startswith('OTREE_ADMIN_PASSWORD="') and line.endswith('"\n')
+    inner = line[len('OTREE_ADMIN_PASSWORD="'):-2]
+    # Undo exactly systemd's double-quote escapes.
+    import re
+
+    assert re.sub(r'\\(["\\$`])', r"\1", inner) == value
+
+
+@pytest.mark.parametrize("value", ["two\nlines", "carriage\rreturn", "nul\x00"])
+def test_a_value_that_could_inject_another_variable_is_refused(value):
+    from otreedeploy import environment
+
+    with pytest.raises(environment.UnsafeValue):
+        environment.render({"OTREE_ADMIN_PASSWORD": value})

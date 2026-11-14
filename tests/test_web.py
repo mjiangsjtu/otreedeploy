@@ -251,3 +251,16 @@ def test_activate_anyway_appears_for_the_live_projects_participants_not_this_one
     active["live"] = 0
     page = client.get("/p/next").text
     assert not any('name="force"' in form for form in _forms(page, "/p/next/activate"))
+
+
+def test_the_participant_address_is_escaped_even_if_the_host_header_is_not(client):
+    """N7: the address is built from the request's Host header and shown on the page."""
+    from otreedeploy import app as app_module
+
+    class FakeURL:
+        hostname = '"><script>alert(1)</script>'
+
+    origin = app_module._experiment_origin(type("R", (), {"url": FakeURL()})())
+    rendered = app_module.templates.env.from_string(
+        "{{ ('<span>' ~ (o | e) ~ '</span>') | safe }}").render(o=origin)
+    assert "<script>" not in rendered and "&lt;script&gt;" in rendered
