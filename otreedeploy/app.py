@@ -99,6 +99,9 @@ def _auth_context(request) -> dict:
         "signed_in": user is not None and user is not accounts.DEV_USER,
         "is_admin": bool(user and user.is_admin),
         "dry_run": config.dry_run(),
+        # Only admins can act on it, so only they are told.
+        "exposed": (not config.behind_proxy() and bool(user and user.is_admin)
+                    and config.public_addresses()),
     }
 
 
@@ -110,6 +113,8 @@ templates = Jinja2Templates(
 
 def _experiment_origin(request) -> str:
     """The address participants type. Port omitted when it is 80, as a browser would."""
+    if config.public_url():
+        return config.public_url() + "/"
     port = config.otree_port()
     host = request.url.hostname
     return f"http://{host}/" if port == 80 else f"http://{host}:{port}/"
@@ -140,6 +145,11 @@ def _audit(request: Request, action: str, slug: str | None = None, detail: str =
 @asynccontextmanager
 async def _lifespan(_: FastAPI):
     db.init()
+    # Settings files follow this app's configuration (e.g. HTTPS mode moves the live
+    # experiment to loopback); rewriting them here applies a change on next restart.
+    for project in db.list_projects():
+        if config.get_settings().project_dir(project.slug).exists():
+            environment.write(project)
     try:
         accounts.init()
     except accounts.AccountError:
@@ -384,7 +394,7 @@ def login(
     auth.note_success(key)
     audit.record("sign_in", user.name, None, client=_client(request))
     response = RedirectResponse(target, status_code=303)
-    _set_session(response, accounts.start_session(user.name))
+    _set_session(response, accounts.start_session(user.name), request)
     return response
 
 
@@ -399,13 +409,15 @@ def logout(request: Request):
     return response
 
 
-def _set_session(response: Response, token: str) -> None:
+def _set_session(response: Response, token: str, request: Request) -> None:
     response.set_cookie(
         access.COOKIE,
         token,
         max_age=accounts.SESSION_MAX_AGE,
         httponly=True,
         samesite="lax",
+        # Over HTTPS the cookie must never travel over plain HTTP.
+        secure=request.url.scheme == "https",
         path="/",
     )
 
@@ -442,7 +454,7 @@ def change_password(
     response = back("password changed; your other sessions have been signed out")
     # Changing the password ended every session of this user, this one included; hand
     # this browser a fresh one rather than bouncing the person who just proved it.
-    _set_session(response, accounts.start_session(user.name))
+    _set_session(response, accounts.start_session(user.name), request)
     return response
 
 

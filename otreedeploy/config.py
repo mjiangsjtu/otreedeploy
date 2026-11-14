@@ -112,6 +112,67 @@ def otree_port() -> int:
     return port
 
 
+def public_url() -> str | None:
+    """The HTTPS address of this server, when ``bootstrap.sh`` put it behind Caddy.
+
+    Set (as ``OTREEDEPLOY_PUBLIC_URL``, e.g. ``https://lab.example.edu``) only in HTTPS
+    mode. Then both this app and the live experiment listen on 127.0.0.1 alone, Caddy
+    is the only thing reachable from the network, and this app trusts its
+    X-Forwarded-* headers for the client's address and scheme.
+    """
+    value = os.environ.get("OTREEDEPLOY_PUBLIC_URL", "").strip().rstrip("/")
+    return value or None
+
+
+def behind_proxy() -> bool:
+    return public_url() is not None
+
+
+def otree_addrport(port: int | None = None) -> str:
+    """The argument to `otree prodserver` for the live experiment.
+
+    Just the port on a lab network, which oTree binds on every interface; behind the
+    HTTPS proxy, loopback only, so the plain-HTTP experiment cannot be reached around it.
+    """
+    port = otree_port() if port is None else port
+    return f"127.0.0.1:{port}" if behind_proxy() else str(port)
+
+
+def public_addresses(ip_json: str | None = None) -> list[str]:
+    """This machine's addresses that are reachable from the internet, if any.
+
+    Plain HTTP is fine on a closed lab network and not fine across the internet, so the
+    app warns when it finds one of these while not behind the HTTPS proxy. Private,
+    link-local and loopback addresses are not "public".
+    """
+    import ipaddress
+    import json
+    import subprocess
+
+    if ip_json is None:
+        if dry_run():
+            return []
+        try:
+            ip_json = subprocess.run(["ip", "-j", "addr"], capture_output=True, text=True,
+                                     timeout=10).stdout
+        except (OSError, subprocess.SubprocessError):
+            return []
+    try:
+        interfaces = json.loads(ip_json or "[]")
+    except ValueError:
+        return []
+    found = []
+    for interface in interfaces:
+        for info in interface.get("addr_info", []):
+            try:
+                address = ipaddress.ip_address(info.get("local", ""))
+            except ValueError:
+                continue
+            if address.is_global:
+                found.append(str(address))
+    return found
+
+
 def dry_run_serves() -> bool:
     """Whether a dry run really boots the live instance instead of only recording it.
 

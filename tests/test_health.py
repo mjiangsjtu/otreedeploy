@@ -143,3 +143,16 @@ def test_unreachable_otree_degrades_instead_of_raising():
 
     with pytest.raises(otreeapi.OtreeError):
         otreeapi.export_csv(dead_port, "key", "all_apps_wide")
+
+
+def test_only_internet_reachable_addresses_count_as_public():
+    import json
+
+    sample = json.dumps([
+        {"addr_info": [{"local": "127.0.0.1"}, {"local": "::1"}]},
+        {"addr_info": [{"local": "10.0.3.17"}, {"local": "fe80::1"}, {"local": "192.168.1.5"}]},
+        {"addr_info": [{"local": "172.20.0.2"}, {"local": "100.64.0.9"}]},
+        {"addr_info": [{"local": "141.211.4.10"}, {"local": "2001:db8::1"}, {"local": "2a02:1::5"}]},
+    ])
+    assert config.public_addresses(sample) == ["141.211.4.10", "2a02:1::5"]
+    assert config.public_addresses("not json") == []

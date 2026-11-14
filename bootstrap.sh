@@ -23,6 +23,11 @@ APP_DIR=/opt/otreedeploy
 STATE_DIR=/var/lib/otreedeploy
 OTREE_HOME=/srv/otree
 APP_PORT="${OTREEDEPLOY_PORT:-8000}"
+# HTTPS: see the "HTTPS" section below. Remembered in $HTTPS_CONF, so a re-run (an
+# upgrade) keeps it without being told again; OTREEDEPLOY_DOMAIN=none turns it off.
+HTTPS_CONF=/etc/otreedeploy/https.env
+HTTPS_PORT=8443
+OTREE_BEHIND_PROXY_PORT=8080
 # The uv release this script is tested against (tests/e2e, run in CI). Pinned because
 # uv's command-line behaviour changes between releases -- an unpinned install once broke
 # re-running this script -- and because the deploy pipeline calls uv on every upload.
@@ -220,17 +225,129 @@ for dir in "$OTREE_HOME"/*/; do
 done
 [[ $projects -gt 0 ]] || info "no projects yet"
 
+# The live experiment's unit, if any. Asked per project: `list-unit-files` would only
+# ever show the template otree@.service, never its enabled instances.
+enabled_experiments() {
+    local dir slug
+    for dir in "$OTREE_HOME"/*/; do
+        slug=$(basename "$dir")
+        [[ $slug =~ ^[a-z][a-z0-9_]{0,38}$ ]] || continue
+        systemctl is-enabled --quiet "otree@$slug.service" 2>/dev/null && echo "otree@$slug.service"
+    done
+    return 0
+}
+
 # An install section changed between versions: re-enable the live experiment so its
 # links match the unit file installed above (e.g. the postgresql.service link).
-for unit in $(systemctl list-unit-files 'otree@*.service' --state=enabled --no-legend | awk '{print $1}'); do
+for unit in $(enabled_experiments); do
     systemctl reenable "$unit" >/dev/null 2>&1 && info "re-enabled $unit"
 done
+# ----------------------------------------------------------------------------- HTTPS
+
+# Plain HTTP is right for a closed lab network: nothing outside can see the traffic.
+# Across the internet it is not -- passwords, participants' answers and data downloads
+# would travel unencrypted. Given a domain name that points at this server, Caddy
+# terminates HTTPS in front of both the experiment and this app, gets and renews the
+# certificate by itself, and both of them move to 127.0.0.1 where only Caddy reaches:
+#
+#   https://<domain>/        the live experiment   (Caddy :443 -> 127.0.0.1:8080)
+#   https://<domain>:8443/   this management app   (Caddy :8443 -> 127.0.0.1:$APP_PORT)
+#   http://<domain>/         redirects to HTTPS
+#
+# For a public certificate the name must resolve to this server and ports 80 and 443
+# must be reachable from the internet (Let's Encrypt checks that). OTREEDEPLOY_TLS=internal
+# uses Caddy's own certificate authority instead, for a lab whose IT installs its root
+# certificate on the lab machines.
+mkdir -p "$(dirname "$HTTPS_CONF")"
+PREVIOUS_HTTPS=""
+[[ -f $HTTPS_CONF ]] && PREVIOUS_HTTPS=$(cat "$HTTPS_CONF")
+DOMAIN="${OTREEDEPLOY_DOMAIN:-}"
+TLS_MODE="${OTREEDEPLOY_TLS:-}"
+if [[ -z $DOMAIN && -f $HTTPS_CONF ]]; then
+    # shellcheck disable=SC1090
+    DOMAIN=$(. "$HTTPS_CONF"; echo "$DOMAIN")
+    TLS_MODE=$(. "$HTTPS_CONF"; echo "$TLS_MODE")
+fi
+[[ $DOMAIN == none ]] && DOMAIN=""
+TLS_MODE="${TLS_MODE:-acme}"
+DROPIN=/etc/systemd/system/otreedeploy.service.d/20-https.conf
+
+if [[ -n $DOMAIN ]]; then
+    log "Setting up HTTPS for $DOMAIN"
+    [[ $DOMAIN =~ ^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$ ]] || die "not a domain name: $DOMAIN"
+    [[ $TLS_MODE == acme || $TLS_MODE == internal ]] || die "OTREEDEPLOY_TLS is 'acme' or 'internal'"
+    if ! command -v caddy >/dev/null 2>&1; then
+        apt-get install -y -qq caddy
+        # The package starts Caddy with a demo page on port 80; it gets its real
+        # configuration below, once the experiment has moved off that port.
+        systemctl stop caddy
+    fi
+    printf 'DOMAIN=%s\nTLS_MODE=%s\n' "$DOMAIN" "$TLS_MODE" > "$HTTPS_CONF"
+    tls_line=""
+    [[ $TLS_MODE == internal ]] && tls_line="    tls internal"
+    cat > /etc/caddy/Caddyfile <<CADDY
+# Written by otreedeploy's bootstrap.sh; re-running it rewrites this file.
+$DOMAIN {
+$tls_line
+    reverse_proxy 127.0.0.1:$OTREE_BEHIND_PROXY_PORT
+}
+
+$DOMAIN:$HTTPS_PORT {
+$tls_line
+    reverse_proxy 127.0.0.1:$APP_PORT
+}
+CADDY
+    install -d -m 0755 "$(dirname "$DROPIN")"
+    printf '# Written by bootstrap.sh: HTTPS through Caddy.\n[Service]\nEnvironment=OTREEDEPLOY_PUBLIC_URL=https://%s\nEnvironment=OTREEDEPLOY_OTREE_PORT=%s\n' \
+        "$DOMAIN" "$OTREE_BEHIND_PROXY_PORT" > "$DROPIN"
+    info "participants: https://$DOMAIN/   management: https://$DOMAIN:$HTTPS_PORT/"
+else
+    if [[ -f $DROPIN ]]; then
+        log "Turning HTTPS off"
+        rm -f "$DROPIN" "$HTTPS_CONF"
+        systemctl disable --now caddy >/dev/null 2>&1 || true
+    fi
+    # Plain HTTP: right for a closed lab network, wrong on the internet. Say so loudly if
+    # this machine has an address the internet can reach.
+    public=$(ip -j addr 2>/dev/null | python3 -c '
+import ipaddress, json, sys
+try:
+    data = json.load(sys.stdin)
+except ValueError:
+    data = []
+print(" ".join(a["local"] for i in data for a in i.get("addr_info", [])
+               if ipaddress.ip_address(a["local"]).is_global))' 2>/dev/null || true)
+    if [[ -n $public ]]; then
+        printf '\n\033[1;33m  WARNING:\033[0m this server has a public internet address (%s) and\n' "$public"
+        printf '  serves plain HTTP: passwords, answers and data downloads travel unencrypted.\n'
+        printf '  Fine only if a firewall keeps the internet out. Otherwise re-run with\n'
+        printf '  OTREEDEPLOY_DOMAIN=<a name for this server> ./bootstrap.sh   (see the README).\n\n'
+    fi
+fi
+systemctl daemon-reload
+HTTPS_NOW=""
+[[ -f $HTTPS_CONF ]] && HTTPS_NOW=$(cat "$HTTPS_CONF")
+
 systemctl enable otreedeploy.service
 # `enable --now` would leave an already-running app on its old code, which makes this
 # script useless as the upgrade path. Restart unconditionally instead -- it starts a
 # stopped app and reloads a running one. Experiments are separate units and keep serving.
 systemctl restart otreedeploy.service
 info "otreedeploy.service enabled and (re)started"
+
+if [[ "$HTTPS_NOW" != "$PREVIOUS_HTTPS" ]]; then
+    # The app has rewritten the experiments' settings for the new mode as it started;
+    # the live one moves now (from port 80 to loopback, or back).
+    sleep 2
+    for unit in $(enabled_experiments); do
+        systemctl restart "$unit" && info "restarted $unit for the new address"
+    done
+fi
+if [[ -n $DOMAIN ]]; then
+    systemctl enable caddy >/dev/null 2>&1
+    systemctl restart caddy
+    info "caddy (re)started"
+fi
 
 # ----------------------------------------------------------------------------- checks
 
@@ -255,12 +372,24 @@ check "the app can use otree-ctl"       "su -s /bin/bash $APP_USER -c 'sudo -n /
 check "neither service runs as root"    "! systemctl show -p User otreedeploy | grep -q 'User=root'"
 check "the management page asks for a password" \
     "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:$APP_PORT/ | grep -q '^303$'"
+if [[ -n $DOMAIN ]]; then
+    check "caddy is running"            "systemctl is-active --quiet caddy"
+    check "the app listens on loopback only" \
+        "! ss -Hltn 'sport = :$APP_PORT' | grep -qv '127.0.0.1'"
+fi
 
 if [[ $failures -gt 0 ]]; then
     die "$failures check(s) failed -- see 'journalctl -u otreedeploy -n 50'"
 fi
 
 ADDR=$(hostname -I 2>/dev/null | awk '{print $1}')
+if [[ -n $DOMAIN ]]; then
+    MANAGE_URL="https://$DOMAIN:$HTTPS_PORT"
+    EXPERIMENT_URL="https://$DOMAIN/          "
+else
+    MANAGE_URL="http://${ADDR:-<this-server>}:$APP_PORT"
+    EXPERIMENT_URL="http://${ADDR:-<this-server>}/     (port 80)"
+fi
 if [[ $ACCOUNT_EXISTED == yes ]]; then
     SIGN_IN="Sign in with your account as before (an install from before accounts: user
   'admin', with the management password you already had)"
@@ -271,15 +400,15 @@ cat <<BANNER
 
   otreedeploy is ready.
 
-    Manage experiments   http://${ADDR:-<this-server>}:$APP_PORT
-    Experiments serve on http://${ADDR:-<this-server>}/     (port 80)
+    Manage experiments   $MANAGE_URL
+    Experiments serve on $EXPERIMENT_URL
 
   $SIGN_IN.
   Create an account for each experimenter on the Users page; each sees only the
   experiments they are a member of.
 
-  The experiment on port 80 is deliberately open -- participants must reach it.
-  The password only guards this management page. Keep port $APP_PORT reachable
-  from your lab network only; see the README.
+  The experiment is deliberately open -- participants must reach it. Accounts
+  guard this management page only. Keep it reachable from your lab network only;
+  see the README.
 
 BANNER

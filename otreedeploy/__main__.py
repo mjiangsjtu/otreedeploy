@@ -14,7 +14,8 @@ def main() -> None:
         prog="otreedeploy",
         description="Web app for deploying oTree experiments on this server.",
     )
-    parser.add_argument("--host", default="0.0.0.0")
+    # Behind the HTTPS proxy, loopback only: Caddy is the one way in.
+    parser.add_argument("--host", default="127.0.0.1" if config.behind_proxy() else "0.0.0.0")
     parser.add_argument("--port", type=int, default=config.DEFAULT_APP_PORT)
     parser.add_argument("--reload", action="store_true")
     args = parser.parse_args()
@@ -25,6 +26,11 @@ def main() -> None:
         port=args.port,
         reload=args.reload,
         log_level="info",
+        # Only behind our own proxy are X-Forwarded-* headers believed, and only from
+        # loopback: they set the client address (sign-in lockouts, audit trail) and
+        # the scheme (Secure cookies, the same-origin check).
+        proxy_headers=config.behind_proxy(),
+        forwarded_allow_ips="127.0.0.1",
     )
 
 

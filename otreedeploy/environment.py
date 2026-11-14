@@ -25,7 +25,9 @@ def build(project: Project, port: int | None = None) -> dict[str, str]:
         "OTREE_REST_KEY": project.rest_key,
         "OTREE_AUTH_LEVEL": project.auth_level,
         "OTREE_PRODUCTION": "1",
-        "PORT": str(port),
+        # The unit runs `otree prodserver ${PORT}`, and prodserver takes "port" or
+        # "address:port" there; behind the HTTPS proxy this is loopback-only.
+        "PORT": config.otree_addrport(port),
     }
 
 

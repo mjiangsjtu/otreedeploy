@@ -53,6 +53,10 @@ def test_upgrading_from_the_submitted_version_moves_projects_to_their_own_users(
         assert server.sh("ls /var/lib/otreedeploy/backups/labdemo").out.count(
             "before-migration") == 1
         assert "otree" not in server.sh("id -nG otreedeploy").out.split()
+        # The live unit was re-enabled under the new unit file: it now comes back
+        # with PostgreSQL (N2), which an upgrade must not leave to a fresh install.
+        assert "otree@labdemo.service" in server.sh(
+            "ls /etc/systemd/system/postgresql.service.wants/").out
 
         # The migrated project keeps working: a new app, then new sessions.
         manager = server.manager().login()

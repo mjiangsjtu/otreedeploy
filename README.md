@@ -173,35 +173,53 @@ ufw allow from 192.0.2.0/24 to any port 8000 proto tcp   # your lab subnet
 ufw enable
 ```
 
-### If it faces the internet
+### If it faces the internet: HTTPS
 
-Everything above assumes a private network. On a cloud VPS the same install is reachable
-by everyone, and three things are worth knowing before you send participants to it.
+Everything above assumes a **closed lab network**, where plain HTTP is the usual practice
+for oTree: nothing outside the lab can see the traffic. Across the internet that is not
+acceptable — the management password, oTree's admin password and every answer a
+participant submits would travel unencrypted. The app warns you (on install, and on
+every page for admins) when the server has a public internet address and no HTTPS.
 
-**There is no TLS.** This app speaks plain HTTP and has no certificate handling at all.
-Across the internet that means the management password, oTree's own admin password, and
-every answer a participant submits travel in the clear. On a lab LAN that is a judgement
-call; on the public internet it is not really one.
-
-**Keep port 8000 off the internet.** This is the cheapest of the three and needs no extra
-software: do not open the port, and reach the management page through an SSH tunnel.
+**With a domain name** that points at the server, one re-run gives it HTTPS:
 
 ```bash
-ssh -L 8000:127.0.0.1:8000 root@<host>
-# then browse to http://127.0.0.1:8000
+OTREEDEPLOY_DOMAIN=lab.example.edu ./bootstrap.sh
 ```
 
-If colleagues need it too, restrict it to known addresses rather than opening it up —
-the same `ufw` rule as above, with their address in place of the lab subnet.
+This installs [Caddy](https://caddyserver.com) from Ubuntu's own packages and puts it in
+front of everything:
 
-**Port 80 has to be open**, because participants cannot sign in to anything. Putting TLS
-in front of it means running a reverse proxy (Caddy is the least work — it obtains
-certificates by itself) and moving the experiment off port 80 so the proxy can have it.
-`OTREEDEPLOY_OTREE_PORT` does that; see [Configuration](#configuration), including the
-step people miss when they change it on a server that already has projects on it.
+| Address | Serves |
+|---|---|
+| `https://lab.example.edu/` | the live experiment, for participants |
+| `https://lab.example.edu:8443/` | this management app |
+| `http://lab.example.edu/` | a redirect to HTTPS |
 
-That is a direction, not a tested recipe: `bootstrap.sh` neither installs nor
-configures a proxy, and nothing in the test suite runs the app behind one.
+The experiment and this app then listen on 127.0.0.1 only, so neither can be reached
+around Caddy. Caddy obtains and renews the certificate from Let's Encrypt by itself.
+Session cookies are marked Secure, and client addresses come from the proxy, for the
+sign-in lockout and the audit trail. Re-running `bootstrap.sh` later (to upgrade) keeps
+HTTPS on; `OTREEDEPLOY_DOMAIN=none` turns it off again. Switching restarts the live
+experiment, so do it between sessions.
+
+For Let's Encrypt to issue the certificate, the name must resolve to this server and
+ports **80 and 443 must be reachable from the internet**. Open 8443 only to the people
+who manage experiments.
+
+**Without a public certificate:** if your institution's IT installs a root certificate
+on the lab machines, `OTREEDEPLOY_TLS=internal` makes Caddy use its own certificate
+authority instead (its root certificate is in
+`/var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt`). Without that
+installation every browser shows a security warning, which is no way to run a session.
+
+> **Tested, with one exception.** The test suite runs this HTTPS setup end to end:
+> switching a server with a live study to HTTPS, participants over HTTPS, sign-in with
+> Secure cookies, the same-origin check, the plain-HTTP ports closed, and upgrades
+> keeping it. It does so with Caddy's internal authority and a made-up name, because
+> obtaining a real certificate needs a real domain and a server reachable from the
+> internet. That last step is Caddy's standard automatic HTTPS, but it has not been
+> exercised here.
 
 ## Using it
 
@@ -254,7 +272,7 @@ you need none of them.
 
 | Variable | Default | What it does |
 |---|---|---|
-| `OTREEDEPLOY_OTREE_PORT` | `80` | The port the live experiment serves on. Move it if something else needs 80 — a TLS reverse proxy, most likely. |
+| `OTREEDEPLOY_OTREE_PORT` | `80` | The port the live experiment serves on. HTTPS mode sets it to 8080 on loopback by itself; change it by hand only if something else needs port 80. |
 | `OTREEDEPLOY_ROOT` | `/` | Prefix for every path the app touches (`/srv/otree`, `/var/lib/otreedeploy`). Mainly a testing seam: it lets the whole app run against a throwaway directory. |
 | `OTREEDEPLOY_DRY_RUN` | unset | Development only. SQLite instead of PostgreSQL, systemd simulated. Never set this on a real server. |
 

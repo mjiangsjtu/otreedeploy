@@ -46,6 +46,9 @@ OTREEDEPLOY_ROOT=/tmp/otreedeploy-dev .venv/bin/otreedeploy-users add ada --admi
 | `OTREEDEPLOY_OTREE_PORT` | The live experiment's port (default 80). In a dry run, setting it also makes the simulated supervisor **really** boot the experiment there. |
 | `OTREEDEPLOY_PORT` | Read by `bootstrap.sh` only, to change the management port. |
 | `OTREEDEPLOY_PASSWORD` | Read by `bootstrap.sh` only: the first account's (`admin`) password, without a prompt. |
+| `OTREEDEPLOY_DOMAIN` | Read by `bootstrap.sh` only: HTTPS through Caddy for this name (remembered in `/etc/otreedeploy/https.env`; `none` turns it off). |
+| `OTREEDEPLOY_TLS` | Read by `bootstrap.sh` only: `acme` (default, Let's Encrypt) or `internal` (Caddy's own CA; what tests/e2e uses). |
+| `OTREEDEPLOY_PUBLIC_URL` | Set by bootstrap's HTTPS drop-in. Means: behind Caddy -- listen on loopback, trust X-Forwarded-* from 127.0.0.1, Secure cookies, live experiment on 127.0.0.1:8080. |
 
 ## What dry run does and does not cover
 

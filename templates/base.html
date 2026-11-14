@@ -38,6 +38,12 @@
   </div>
 </header>
 <main>
+  {% if exposed %}
+  <div class="msg warn">
+    <strong>{{ t("This server has a public internet address ({addresses}) but serves plain HTTP.", addresses=exposed | join(", ")) }}</strong>
+    {{ t("Passwords, participants' answers and downloads travel unencrypted. Plain HTTP is only for a closed lab network: run bootstrap.sh again with OTREEDEPLOY_DOMAIN set to give this server HTTPS (see the README).") }}
+  </div>
+  {% endif %}
   {% if error %}<div class="msg bad">{{ msg(error) }}</div>{% endif %}
   {% if notice %}<div class="msg ok">{{ msg(notice) }}</div>{% endif %}
   {% block body %}{% endblock %}

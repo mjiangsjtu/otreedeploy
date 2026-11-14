@@ -72,6 +72,8 @@ ZH: dict[str, str] = {
     "This deploy failed. Nothing was changed for participants.": "本次部署失败，参与者一侧没有任何改动。",
     "Activate anyway, interrupting {n} participant(s) in {name}": "仍然启用，并中断 {name} 中的 {n} 位参与者",
     "Restart anyway": "仍然重启",
+    "This server has a public internet address ({addresses}) but serves plain HTTP.": "此服务器有公网地址（{addresses}），但使用未加密的 HTTP。",
+    "Passwords, participants' answers and downloads travel unencrypted. Plain HTTP is only for a closed lab network: run bootstrap.sh again with OTREEDEPLOY_DOMAIN set to give this server HTTPS (see the README).": "密码、参与者的回答和下载的数据都以明文传输。HTTP 只适用于封闭的实验室网络：请设置 OTREEDEPLOY_DOMAIN 后再次运行 bootstrap.sh，为此服务器启用 HTTPS（见 README）。",
     "Add": "添加",
     "Add a user": "添加用户",
     "Admin (sees every project, manages accounts)": "管理员（可查看所有项目并管理账户）",
