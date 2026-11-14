@@ -134,35 +134,38 @@ info "installed the app into $APP_DIR/.venv"
 
 # ------------------------------------------------------------------------- password
 
-log "Setting the management password"
+log "Setting up the first account"
 # Guards this app only. The experiments on port 80 stay open -- participants have to
-# reach them -- so the point of the password is that a subject who finds port $APP_PORT
-# cannot stop the study they are sitting in, or download everyone else's data.
-PASSWD_BIN="$APP_DIR/.venv/bin/otreedeploy-passwd"
-as_app() { su -s /bin/bash "$APP_USER" -c "$1"; }
+# reach them -- so the point of accounts is that a subject who finds port $APP_PORT
+# cannot stop the study they are sitting in, and that each group sees only its own
+# studies. The first account is the admin `admin`, who creates everyone else's on the
+# Users page. An install from before accounts existed keeps its password: it becomes
+# admin's (the check below performs that migration).
+USERS_BIN="$APP_DIR/.venv/bin/otreedeploy-users"
+as_app() { su -s /bin/bash "$APP_USER" -c "cd / && $1"; }
 
-PASSWORD_WAS_SET=no
-if as_app "$PASSWD_BIN --check"; then
-    PASSWORD_WAS_SET=yes
-    info "already set -- keeping it (change it on the System page, or with $PASSWD_BIN)"
+ACCOUNT_EXISTED=no
+if as_app "$USERS_BIN --check"; then
+    ACCOUNT_EXISTED=yes
+    info "accounts exist -- keeping them (manage them on the Users page, or with $USERS_BIN)"
 elif [[ -n "${OTREEDEPLOY_PASSWORD:-}" ]]; then
     # printf is a shell builtin and the value is piped, so it never appears in `ps`.
-    printf '%s\n' "$OTREEDEPLOY_PASSWORD" | as_app "$PASSWD_BIN --stdin"
-    info "taken from OTREEDEPLOY_PASSWORD"
+    printf '%s\n' "$OTREEDEPLOY_PASSWORD" | as_app "$USERS_BIN add admin --admin --stdin" >/dev/null
+    info "created admin, password taken from OTREEDEPLOY_PASSWORD"
 elif [[ -t 0 ]]; then
     while true; do
-        read -rsp "    Choose a password for the management page: " pw1; echo
+        read -rsp "    Choose a password for the admin account: " pw1; echo
         read -rsp "    Type it again: " pw2; echo
         if [[ "$pw1" != "$pw2" ]]; then
             info "those did not match -- try again"
-        elif printf '%s\n' "$pw1" | as_app "$PASSWD_BIN --stdin" >/dev/null; then
+        elif printf '%s\n' "$pw1" | as_app "$USERS_BIN add admin --admin --stdin" >/dev/null; then
             break
         fi
     done
     unset pw1 pw2
-    info "password set"
+    info "created admin"
 else
-    die "no password is set and there is no terminal to ask on.
+    die "no account exists and there is no terminal to ask on.
     Re-run as:  OTREEDEPLOY_PASSWORD='something-long' ./bootstrap.sh"
 fi
 
@@ -258,10 +261,11 @@ if [[ $failures -gt 0 ]]; then
 fi
 
 ADDR=$(hostname -I 2>/dev/null | awk '{print $1}')
-if [[ $PASSWORD_WAS_SET == yes ]]; then
-    SIGN_IN="Sign in with the password you already had (this run kept it)"
+if [[ $ACCOUNT_EXISTED == yes ]]; then
+    SIGN_IN="Sign in with your account as before (an install from before accounts: user
+  'admin', with the management password you already had)"
 else
-    SIGN_IN="Sign in with the password you just chose"
+    SIGN_IN="Sign in as 'admin' with the password you just chose"
 fi
 cat <<BANNER
 
@@ -270,8 +274,9 @@ cat <<BANNER
     Manage experiments   http://${ADDR:-<this-server>}:$APP_PORT
     Experiments serve on http://${ADDR:-<this-server>}/     (port 80)
 
-  $SIGN_IN, then upload an .otreezip to deploy
-  your first experiment. Change the password later on the System page.
+  $SIGN_IN.
+  Create an account for each experimenter on the Users page; each sees only the
+  experiments they are a member of.
 
   The experiment on port 80 is deliberately open -- participants must reach it.
   The password only guards this management page. Keep port $APP_PORT reachable

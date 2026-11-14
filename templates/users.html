@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% set page = 'users' %}
+{% block title %}{{ t("Users") }} — otreedeploy{% endblock %}
+{% block body %}
+<h1>{{ t("Users") }}</h1>
+<p class="sub">{{ t("Everyone who can sign in to this page. Each person sees only the projects they are a member of; admins see all of them.") }}</p>
+
+{% if one_time %}
+<div class="msg warn">
+  <strong>{{ t("Password for {name}:", name=one_time.name) }}</strong>
+  <code class="mono">{{ one_time.password }}</code><br>
+  {{ t("Shown only this once. Give it to them in person or by phone, and ask them to change it after signing in.") }}
+</div>
+{% endif %}
+
+<div class="panel tight">
+  <table>
+    <thead><tr><th>{{ t("User") }}</th><th>{{ t("Projects") }}</th><th></th></tr></thead>
+    <tbody>
+    {% for row in rows %}
+      {% set u = row.user %}
+      <tr>
+        <td class="mono">{{ u.name }}
+          {% if u.is_admin %}<span class="badge live">{{ t("admin") }}</span>{% endif %}
+          {% if u.disabled %}<span class="badge stopped">{{ t("disabled") }}</span>{% endif %}
+        </td>
+        <td>{% if u.is_admin %}<span style="color:var(--muted)">{{ t("all") }}</span>
+            {% else %}{% for slug in row.projects %}<a class="mono" href="/p/{{ slug }}">{{ slug }}</a>{{ ", " if not loop.last }}{% else %}—{% endfor %}{% endif %}</td>
+        <td style="text-align:right;white-space:nowrap">
+          <form method="post" action="/users/{{ u.name }}/password" style="display:inline">
+            <button class="btn small">{{ t("New password") }}</button>
+          </form>
+          <form method="post" action="/users/{{ u.name }}/admin" style="display:inline">
+            {% if not u.is_admin %}<input type="hidden" name="on" value="true">{% endif %}
+            <button class="btn small">{{ t("Remove admin") if u.is_admin else t("Make admin") }}</button>
+          </form>
+          {% if u.name != user.name %}
+          <form method="post" action="/users/{{ u.name }}/disable" style="display:inline">
+            {% if not u.disabled %}<input type="hidden" name="disabled" value="true">{% endif %}
+            <button class="btn small {{ 'danger' if not u.disabled }}">{{ t("Enable") if u.disabled else t("Disable") }}</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<h2>{{ t("Add a user") }}</h2>
+<form class="panel" method="post" action="/users/add">
+  <div class="field">
+    <label for="name">{{ t("User name") }}</label>
+    <input id="name" name="name" required pattern="[a-z][a-z0-9._\-]{1,31}" autocapitalize="none">
+  </div>
+  <label><input type="checkbox" name="is_admin" value="true"> {{ t("Admin (sees every project, manages accounts)") }}</label>
+  <p><button class="btn primary">{{ t("Create, with a one-time password") }}</button></p>
+  <p class="hint">{{ t("New users see nothing until they upload a project or a project's members add them.") }}</p>
+</form>
+{% endblock %}

@@ -23,7 +23,7 @@ dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
 
 [project.scripts]
 otreedeploy = "otreedeploy.__main__:main"
-otreedeploy-passwd = "otreedeploy.auth:main"
+otreedeploy-users = "otreedeploy.accounts:main"
 
 [build-system]
 requires = ["hatchling"]

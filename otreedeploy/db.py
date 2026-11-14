@@ -9,6 +9,7 @@ rendered from it.
 
 from __future__ import annotations
 
+import contextvars
 import secrets
 import sqlite3
 import time
@@ -47,6 +48,11 @@ CREATE TABLE IF NOT EXISTS events (
     at      INTEGER NOT NULL,
     kind    TEXT NOT NULL,
     message TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT
 );
 
 CREATE INDEX IF NOT EXISTS events_at ON events(at DESC);
@@ -106,6 +112,25 @@ def connect() -> sqlite3.Connection:
 def init() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
+        # Added with accounts: who did it. Older databases lack the column.
+        columns = {r["name"] for r in conn.execute("PRAGMA table_info(events)")}
+        if "user" not in columns:
+            conn.execute("ALTER TABLE events ADD COLUMN user TEXT")
+
+
+def get_setting(key: str) -> str | None:
+    with connect() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def set_setting(key: str, value: str | None) -> None:
+    with connect() as conn:
+        if value is None:
+            conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+        else:
+            conn.execute("INSERT INTO settings (key, value) VALUES (?, ?) "
+                         "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, value))
 
 
 def new_secret(length: int = 24) -> str:
@@ -237,11 +262,16 @@ def _release(row: sqlite3.Row) -> Release:
 # ----------------------------------------------------------------------------- events
 
 
+# Who is acting, set per request by access.EnforceAccess (and carried into deploy
+# threads), so that the history records it without threading a user through every call.
+actor: contextvars.ContextVar[str | None] = contextvars.ContextVar("actor", default=None)
+
+
 def log_event(kind: str, message: str, slug: str | None = None) -> None:
     with connect() as conn:
         conn.execute(
-            "INSERT INTO events (slug, at, kind, message) VALUES (?, ?, ?, ?)",
-            (slug, int(time.time()), kind, message),
+            "INSERT INTO events (slug, at, kind, message, user) VALUES (?, ?, ?, ?, ?)",
+            (slug, int(time.time()), kind, message, actor.get()),
         )
 
 

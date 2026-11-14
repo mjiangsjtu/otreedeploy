@@ -19,7 +19,7 @@ def test_a_fresh_install_passes_its_own_checks_and_asks_for_a_password(fresh_ins
     assert "otreedeploy is ready" in fresh_install
     assert "✗" not in fresh_install
     assert http_status(f"http://{server.ip}:8000/") == 303  # to the sign-in page
-    mode = server.sh("stat -c '%a %U' /var/lib/otreedeploy/auth.json").out.split()
+    mode = server.sh("stat -c '%a %U' /var/lib/otreedeploy/accounts.db").out.split()
     assert mode == ["600", "otreedeploy"]
 
 

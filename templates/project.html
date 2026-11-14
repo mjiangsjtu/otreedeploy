@@ -25,12 +25,14 @@
       <form method="post" action="/p/{{ project.slug }}/activate">
         <button class="btn primary" {{ 'disabled' if not release }}>{{ t("Make this live on port {port}") }}</button>
       </form>
-      {% if incumbent_participants %}
+      {% if incumbent_participants and may_force_incumbent %}
       {# The people interrupted by activating are the live project's, not this one's. #}
       <form method="post" action="/p/{{ project.slug }}/activate">
         <input type="hidden" name="force" value="true">
         <button class="btn danger small">{{ t("Activate anyway, interrupting {n} participant(s) in {name}", n=incumbent_participants, name=active_slug) }}</button>
       </form>
+      {% elif incumbent_participants %}
+      <span class="hint">{{ t("{n} participant(s) are active in another group's live experiment; only its members ({names}) can interrupt them.", n=incumbent_participants, names=live_contacts or "—") }}</span>
       {% endif %}
     {% else %}
       <a class="btn" href="{{ experiment_origin(request) }}" target="_blank" rel="noopener">{{ t("Open oTree admin ↗") }}</a>
@@ -163,6 +165,48 @@
   </table>
 </div>
 
+<div class="grid2">
+  <div>
+    <h2>{{ t("People with access") }}</h2>
+    <div class="panel">
+      <p class="hint">{{ t("Members can do everything with this experiment, including downloading its data. Admins can too.") }}</p>
+      <table><tbody>
+      {% for name in members %}
+        <tr><td class="mono">{{ name }}</td>
+          <td style="text-align:right">
+            <form method="post" action="/p/{{ project.slug }}/members/remove"
+                  onsubmit="return confirm({{ t('Remove {name} from {slug}?', name=name, slug=project.slug) | tojson }})">
+              <input type="hidden" name="name" value="{{ name }}">
+              <button class="btn small">{{ t("Remove") }}</button>
+            </form>
+          </td></tr>
+      {% else %}
+        <tr><td class="empty">{{ t("No members: only admins can see this experiment.") }}</td></tr>
+      {% endfor %}
+      </tbody></table>
+      {% if addable %}
+      <form method="post" action="/p/{{ project.slug }}/members/add" class="actions" style="margin-top:12px">
+        <select name="name">{% for name in addable %}<option>{{ name }}</option>{% endfor %}</select>
+        <button class="btn small">{{ t("Add") }}</button>
+      </form>
+      {% endif %}
+    </div>
+  </div>
+  <div>
+    <h2>{{ t("Who did what") }}</h2>
+    <div class="panel tight">
+      <table><tbody>
+      {% for e in history %}
+        <tr><td style="white-space:nowrap;color:var(--muted)">{{ e.at | datetime }}</td>
+            <td class="mono">{{ e.user }}</td><td>{{ e.action }}{% if e.detail %}: {{ e.detail }}{% endif %}</td></tr>
+      {% else %}
+        <tr><td class="empty">{{ t("Nothing recorded yet.") }}</td></tr>
+      {% endfor %}
+      </tbody></table>
+    </div>
+  </div>
+</div>
+
 <h2>{{ t("Live log") }}</h2>
 <div class="console" id="console">{{ t("Connecting to the log…") }}</div>
 <p class="hint">{{ t("Streamed from the system journal for this experiment.") }}</p>
@@ -211,13 +255,19 @@
             onsubmit="return confirm({{ t('Permanently delete {slug}?', slug=project.slug) | tojson }})">
         <p><strong>{{ t("Delete this experiment.") }}</strong>
         {{ t("Removes the code, every release and the database. A final backup is kept.") }}</p>
-        <p class="hint">{{ t("The backup file stays on the server, but this page will be gone.") }}</p>
+        <p class="hint">{{ t("The backups and uploaded files are set aside where only an admin can reach them, and are removed when the server's retention period ends.") }}</p>
         <div class="field">
           <label for="confirmDelete">{{ t("Type {slug} to confirm", slug='<span class="mono">' ~ project.slug ~ '</span>') | safe }}</label>
           <input type="text" id="confirmDelete" name="confirm" autocomplete="off">
         </div>
         {% if participants %}<label><input type="checkbox" name="force" value="true">
           {{ t("Yes, even though {n} participant(s) are active", n=participants) }}</label>{% endif %}
+        <label><input type="checkbox" name="purge" value="true">
+          {{ t("Also delete every backup and uploaded file of this experiment, now. Nothing can be recovered afterwards.") }}</label>
+        <div class="field">
+          <label for="confirmPurge">{{ t("For that, also type {words}", words='<span class="mono">delete all data</span>') | safe }}</label>
+          <input type="text" id="confirmPurge" name="confirm_purge" autocomplete="off">
+        </div>
         <button class="btn danger">{{ t("Delete experiment") }}</button>
       </form>
     </div>

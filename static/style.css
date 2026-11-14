@@ -81,6 +81,8 @@ header.top form.signout button {
   background: none; border: 0; padding: 0; cursor: pointer;
 }
 header.top form.signout button:hover { color: var(--ink); }
+header.top a.whoami { font-size: 13px; color: var(--ink); text-decoration: none; }
+header.top a.whoami:hover { text-decoration: underline; }
 @media (max-width: 560px) {
   header.top .inner { gap: 12px; }
   header.top nav { gap: 12px; }

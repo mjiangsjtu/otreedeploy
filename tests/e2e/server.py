@@ -216,8 +216,8 @@ class Manager:
         self.http = httpx.Client(base_url=base, timeout=600, follow_redirects=False,
                                  headers={"Origin": base})
 
-    def login(self, password: str = PASSWORD) -> "Manager":
-        r = self.http.post("/login", data={"password": password, "next": "/"})
+    def login(self, password: str = PASSWORD, user: str = "admin") -> "Manager":
+        r = self.http.post("/login", data={"username": user, "password": password, "next": "/"})
         assert r.status_code == 303 and "error" not in r.headers.get("location", ""), (
             f"sign-in failed: {r.status_code} {r.headers.get('location')}"
         )

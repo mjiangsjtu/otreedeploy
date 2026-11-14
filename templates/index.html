@@ -5,6 +5,8 @@
 <p class="sub">
   {% if active_slug %}
     <strong>{{ active_slug }}</strong> {{ t("is live on port {port}.") }}
+  {% elif other_live %}
+    {{ t("Another group's experiment is live on port {port} (its members: {names}).", names=live_contacts or "—") }}
   {% else %}
     {{ t("Nothing is currently serving on port {port}.") }}
   {% endif %}

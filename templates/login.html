@@ -7,11 +7,14 @@
   <p class="sub">{{ t("This page deploys and manages experiments. Participants never need it — they go straight to the experiment.") }}</p>
   <form method="post" action="/login">
     <input type="hidden" name="next" value="{{ next }}">
+    <label for="username">{{ t("User name") }}</label>
+    <input id="username" type="text" name="username" required autofocus
+           autocomplete="username" autocapitalize="none" value="{{ username or '' }}">
     <label for="password">{{ t("Password") }}</label>
-    <input id="password" type="password" name="password" required autofocus
+    <input id="password" type="password" name="password" required
            autocomplete="current-password">
     <button class="btn primary" type="submit">{{ t("Sign in") }}</button>
   </form>
-  <p class="hint">{{ t("Chosen when this server was set up. Once signed in you can change it on the System page.") }}</p>
+  <p class="hint">{{ t("Your account is created by an admin of this server. Once signed in you can change your password under your name, top right.") }}</p>
 </div>
 {% endblock %}

@@ -36,8 +36,12 @@ identical.
 - **Data downloads for any experiment, running or not.** Stopped projects are started
   privately for a moment to produce the CSV, without disturbing whatever is live.
 - **Live logs**, streamed from the journal into the browser.
-- **One password on the management app**, so a participant who finds port 8000 cannot
-  stop the study they are sitting in. The experiment on port 80 stays open, as it must.
+- **Accounts for each experimenter.** Each person sees only the experiments they are a
+  member of; admins see all and manage accounts. Every data download and every action
+  is recorded in an audit trail kept in the system journal. The experiment on port 80
+  stays open, as it must.
+- **Retention**: how long backups and uploaded files are kept, and a delete that
+  really deletes.
 - **English and Simplified Chinese**, switchable from any page.
 
 ## Setting up the server
@@ -111,11 +115,12 @@ cd /root/otreedeploy
 exactly the privilege provisioning needs. It installs PostgreSQL and `uv`, creates the service users,
 sets up the databases, installs the systemd units, and starts the app. It is idempotent,
 so re-running it is also how you upgrade: unpack the new version anywhere and run it
-again. Your experiments, their databases and your password all survive.
+again. Your experiments, their databases and your accounts all survive.
 
-**It asks you to choose a password** for the management page. A re-run keeps the one you
-already set rather than asking again. To install without a prompt — from a provisioning
-script, say:
+**It asks you to choose a password** for the first account, the admin `admin`. A re-run
+keeps the accounts rather than asking again; an install from before accounts existed
+keeps its management password, which becomes `admin`'s. To install without a prompt —
+from a provisioning script, say:
 
 ```bash
 OTREEDEPLOY_PASSWORD='something long' ./bootstrap.sh
@@ -131,22 +136,35 @@ When it finishes it prints the two URLs. Open the management one, sign in, and u
 | 80 | The live experiment | Participants — lab machines, or wider if you run online |
 | 8000 | This management app | You and your experimenters, on the lab network only |
 
-**The management app asks for a password**, chosen when you run `bootstrap.sh`. Port 80
-does not and must not — participants have to reach the experiment without signing in.
-The password is what stops somebody at a lab machine from finding port 8000 and stopping
-the study they are sitting in, or downloading everyone else's data.
+**The management app asks you to sign in.** Port 80 does not and must not —
+participants have to reach the experiment without signing in. Accounts are what stop
+somebody at a lab machine from finding port 8000 and stopping the study they are
+sitting in, and what keep each group's data to that group:
 
-Change it later on the *System* page, or on the server:
+- **Users** (admins only): create an account for each experimenter. A one-time password
+  is shown once; they change it under their name, top right.
+- **Projects**: whoever uploads a project is its member; members add colleagues under
+  *People with access* on the project page. Nobody else sees that the project exists.
+  Admins see everything.
+- **Audit trail** (System page): who signed in, who downloaded which data, who
+  deployed, reset, restored or deleted what, and when. It is kept in the system journal,
+  which neither this app nor the experiments can alter:
+  `journalctl -t otreedeploy-audit _UID=$(id -u otreedeploy)`. How long the journal
+  keeps it is set in `/etc/systemd/journald.conf` (`MaxRetentionSec`).
+- **Retention** (System page): how many days backups and uploaded files are kept.
+  Nothing is deleted until you set it. *Delete* on a project can also delete every
+  backup and upload of it at once, for a request to erase the data.
+
+From a shell on the server, for setting up or for recovery (no old password needed —
+a root shell is already more access than the accounts protect):
 
 ```bash
-sudo -u otreedeploy /opt/otreedeploy/.venv/bin/otreedeploy-passwd
+sudo -u otreedeploy /opt/otreedeploy/.venv/bin/otreedeploy-users list
+sudo -u otreedeploy /opt/otreedeploy/.venv/bin/otreedeploy-users passwd admin
+sudo -u otreedeploy /opt/otreedeploy/.venv/bin/otreedeploy-users add maria
 ```
 
-A forgotten password is recovered the same way — that command overwrites whatever is
-there, and needs no old password, because reaching a root shell on the server is
-already more access than the password protects.
-
-One password is not a substitute for a firewall. On a lab network, open port 80 and
+Accounts are not a substitute for a firewall. On a lab network, open port 80 and
 restrict port 8000 to your own subnet:
 
 ```bash
@@ -270,7 +288,7 @@ rather than at startup — so the app will start and then return 500s.
 | Variable | Default | What it does |
 |---|---|---|
 | `OTREEDEPLOY_PORT` | `8000` | The management app's own port. `bootstrap.sh` writes it into the systemd unit at install time. |
-| `OTREEDEPLOY_PASSWORD` | — | Sets the management password without prompting, for unattended installs. Ignored if a password is already set. |
+| `OTREEDEPLOY_PASSWORD` | — | The password of the first account, `admin`, without prompting, for unattended installs. Ignored once any account exists. |
 
 ```bash
 OTREEDEPLOY_PORT=9000 OTREEDEPLOY_PASSWORD='something long' ./bootstrap.sh
@@ -309,7 +327,7 @@ Edit and restart `otreedeploy.service` if you do:
 ```
 /opt/otreedeploy/                 this app
 /var/lib/otreedeploy/
-    auth.json                     the management password, hashed (mode 0600)
+    accounts.db                   accounts, memberships, sessions (hashed; mode 0600)
     state.db                      deployment metadata (SQLite)
     uploads/<slug>/               every uploaded .otreezip, kept verbatim
     backups/<slug>/               pg_dump snapshots
@@ -376,11 +394,11 @@ Dry-run mode is not a set of stubs: experiments use SQLite instead of PostgreSQL
 systemd is simulated, but archives are really extracted, virtualenvs really built, and
 oTree really started. You can upload a project and click through the whole app.
 
-There is no password until you set one, which is what keeps this friction-free. To try
-the login, point `otreedeploy-passwd` at the same root:
+With no accounts a dry run is open, which is what keeps it friction-free. To try
+accounts, create one against the same root:
 
 ```bash
-OTREEDEPLOY_ROOT=/tmp/otreedeploy-dev .venv/bin/otreedeploy-passwd
+OTREEDEPLOY_ROOT=/tmp/otreedeploy-dev .venv/bin/otreedeploy-users add ada --admin
 ```
 
 ```bash
@@ -402,9 +420,9 @@ download the resulting CSV.
 | Port 80 refused after a reboot | `systemctl is-enabled otree@<slug>` — activating a project is what enables it |
 | Cannot bind port 80 | Rare, and LXC-specific; `sysctl net.ipv4.ip_unprivileged_port_start=80` in the container. VMs and VPSes are unaffected |
 | `./bootstrap.sh: Permission denied` | The executable bit was lost (a ZIP download does this; the `.tar.gz` does not). Run `bash bootstrap.sh` |
-| Forgotten the management password | `sudo -u otreedeploy /opt/otreedeploy/.venv/bin/otreedeploy-passwd` — it overwrites without asking for the old one |
-| "Too many attempts" | Five wrong guesses lock that address out, for longer each time. Wait, or set a new password with the command above |
-| Every page returns 503 | `/var/lib/otreedeploy/auth.json` is damaged. That is refused rather than treated as "no password"; rewrite it with the command above |
+| Forgotten a password | An admin sets a new one on the Users page; for the admin, `sudo -u otreedeploy /opt/otreedeploy/.venv/bin/otreedeploy-users passwd admin` |
+| "Too many attempts" | Five wrong guesses lock that name on that machine out, for longer each time. Wait, or set a new password as above |
+| Every page returns 503 | No account exists yet, or an old `auth.json` could not be migrated. The page says which; create an account with `otreedeploy-users add admin --admin` |
 
 Backups are plain gzipped `pg_dump` files in `/var/lib/otreedeploy/backups/<slug>/`, and
 also downloadable from the project page. To put one back, use **Restore a backup** in the

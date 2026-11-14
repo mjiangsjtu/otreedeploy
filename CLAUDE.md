@@ -29,8 +29,9 @@ uv venv && uv pip install -e ".[dev]"
 OTREEDEPLOY_ROOT=/tmp/otreedeploy-dev OTREEDEPLOY_DRY_RUN=1 \
   .venv/bin/otreedeploy --host 127.0.0.1 --port 8123
 
-# A dry run has no password until one is set against the same root.
-OTREEDEPLOY_ROOT=/tmp/otreedeploy-dev .venv/bin/otreedeploy-passwd
+# A dry run with no accounts is open (as the built-in user "dev", an admin).
+# To try accounts, create one against the same root:
+OTREEDEPLOY_ROOT=/tmp/otreedeploy-dev .venv/bin/otreedeploy-users add ada --admin
 
 .venv/bin/python -m pytest                # everything
 .venv/bin/python -m pytest -m "not slow"  # skip real builds and boots
@@ -44,7 +45,7 @@ OTREEDEPLOY_ROOT=/tmp/otreedeploy-dev .venv/bin/otreedeploy-passwd
 | `OTREEDEPLOY_DRY_RUN` | SQLite instead of PostgreSQL; systemd simulated. |
 | `OTREEDEPLOY_OTREE_PORT` | The live experiment's port (default 80). In a dry run, setting it also makes the simulated supervisor **really** boot the experiment there. |
 | `OTREEDEPLOY_PORT` | Read by `bootstrap.sh` only, to change the management port. |
-| `OTREEDEPLOY_PASSWORD` | Read by `bootstrap.sh` only, to set the password without a prompt. |
+| `OTREEDEPLOY_PASSWORD` | Read by `bootstrap.sh` only: the first account's (`admin`) password, without a prompt. |
 
 ## What dry run does and does not cover
 
@@ -65,11 +66,11 @@ When touching any of these, say plainly that the unit tests cannot confirm it, a
 the end-to-end suite (`tests/e2e/README.md`), which uses real systemd, PostgreSQL, sudo
 and `bootstrap.sh` in a container.
 
-The password is **not** in that gap. `auth.py` is ordinary Python with nothing
-substituted, and `tests/test_auth.py` drives it through the real HTTP stack, so a claim
-that the login works is a claim the tests actually support. What they do not cover is
-`bootstrap.sh` itself — the prompt loop, `su`-ing to the app user, the resulting file
-mode. Say so, and give the `ls -l /var/lib/otreedeploy/auth.json` check.
+Accounts are **not** in that gap. `accounts.py` and `access.py` are ordinary Python with
+nothing substituted, and `tests/test_accounts.py` drives every route as every kind of
+user through the real HTTP stack. The audit trail is: a dry run writes `audit.log`
+instead of the journal, so the journal path, and `bootstrap.sh`'s account step, are
+only covered by `tests/e2e`.
 
 ## Layout
 
@@ -114,36 +115,41 @@ These are load-bearing. Breaking one is how this app loses somebody's data.
 5. **`current` is repointed atomically**, via a temporary symlink and `rename`.
 6. **A project's port is never hardcoded.** Templates render `otree_port()`. A test
    fails if any template contains a literal "port 80".
-7. **The password guards the management app and nothing else.** Port 80 must stay open
-   or participants cannot take part. `auth.RequireLogin` wraps the whole app so a new
-   route is protected by default; `auth.PUBLIC_PATHS` is the short list of exceptions.
-8. **An unreadable credential file locks the app, never opens it.** "No file" means no
-   password was ever set; a damaged one means 503.
+7. **Every route has an access rule, or it is closed.** `access.RULES` maps each route
+   to public / signed-in / member of `{slug}` / admin, enforced by `access.EnforceAccess`
+   before the route runs; a route without a rule answers 500, and
+   `test_every_route_has_an_access_rule` fails. Accounts guard the management app and
+   nothing else: port 80 must stay open or participants cannot take part.
+8. **Accounts fail closed.** A real install with no account, or with an old password
+   file that cannot be migrated, answers 503 everywhere; only a dry run with no
+   accounts is open.
 9. **Readiness probing never raises.** A non-HTTP reply means "not ready", not a crash —
    including the TCP self-connect a loopback probe can hit. `EPHEMERAL_PORT_RANGE` sits
    below the kernel's ephemeral range so that cannot happen in the first place.
 
-## The password
+## Accounts
 
-One password, no accounts. Set by `bootstrap.sh`, hashed with PBKDF2 into
-`/var/lib/otreedeploy/auth.json` (0600) — deliberately not in `state.db`, which gets
-copied around during debugging.
+Each person signs in as themselves (`accounts.py`); a project's members can do
+everything with it and nobody else can see it (one level, by design); admins see every
+project and manage accounts. Stored in `/var/lib/otreedeploy/accounts.db` (0600) --
+deliberately not in `state.db`, which gets copied around during debugging.
 
-- **No password file at all means the app serves unprotected.** That is what keeps a dry
-  run on a laptop friction-free, and it is why every page carries a warning banner until
-  one is set. Do not "helpfully" make an unset password fail closed without also giving
-  the developer workflow a way through.
-- The session cookie is stateless: an expiry plus an HMAC over it, signed with a secret
-  stored beside the hash. Changing the password rotates that secret, which is what signs
-  every other browser out.
-- The **first** password cannot be set through the web UI. Until one exists the app is
-  open, so anyone on the network could claim it and lock the experimenter out.
-- A background request (`Accept: text/event-stream`) gets 401, not a redirect: the two
-  log streams cannot act on a login page delivered as though it were data.
-- Failed sign-ins lock that address out for a doubling interval, and the lockout applies
-  to the right password too — letting exactly one guess through would say which it was.
-- The "no password is set" banner is suppressed in a dry run. That is intentional, not an
-  oversight: the banner warns about an exposed lab server, and a dry run is a laptop.
+- Sessions are server-side (only a hash of the cookie is stored), so signing out,
+  disabling an account or changing a password ends sessions at once.
+- An install from before accounts had one password in `auth.json`; `accounts.init()`
+  turns it into the admin account `admin` with the same hash and renames the file.
+- The first account is created on the server (`bootstrap.sh`, or `otreedeploy-users
+  add`), never through the web: a server with no account is locked, not open.
+- Uploading a new project makes you a member. A file named after somebody else's
+  project becomes a separate project rather than touching theirs.
+- Forcing an activation past the live project's active participants needs membership
+  of *that* project.
+- Every action that touches a project or its data goes to the audit trail
+  (`audit.py`, the system journal), filtered on this app's own uid when read back.
+  Use `_audit(request, ...)` in a new route that does anything.
+- A background request (`Accept: text/event-stream`) gets 401, not a redirect.
+- Failed sign-ins lock that address *and name* out for a doubling interval; the lockout
+  applies to the right password too.
 
 ## Bilingual UI
 

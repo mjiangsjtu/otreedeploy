@@ -41,34 +41,59 @@
   </dl>
 </div>
 
-<h2>{{ t("Access") }}</h2>
+<h2>{{ t("Retention") }}</h2>
 <div class="panel">
-  {% if auth_required %}
-  <p class="hint">{{ t("This page needs a password. The experiment on port {port} does not — participants go straight to it.") }}</p>
-  <form method="post" action="/password" class="passwd">
-    <div class="field">
-      <label for="current_password">{{ t("Current password") }}</label>
-      <input id="current_password" type="password" name="current_password" required
-             autocomplete="current-password">
-    </div>
-    <div class="field">
-      <label for="new_password">{{ t("New password") }}</label>
-      <input id="new_password" type="password" name="new_password" required
-             minlength="{{ min_password_length }}" autocomplete="new-password">
-    </div>
-    <div class="field">
-      <label for="confirm_password">{{ t("Repeat it") }}</label>
-      <input id="confirm_password" type="password" name="confirm_password" required
-             minlength="{{ min_password_length }}" autocomplete="new-password">
-    </div>
-    <button class="btn" type="submit">{{ t("Change password") }}</button>
-  </form>
-  <p class="hint">{{ t("At least {n} characters. Changing it signs out every other browser.", n=min_password_length) }}</p>
-  {% else %}
-  <p>{{ t("No password is set, so anyone who can reach this page can stop an experiment or download its data.") }}</p>
-  <p class="hint">{{ t("Set the first one on the server itself, so nobody on the network can claim it first:") }}</p>
-  <p><code class="mono">sudo -u otreedeploy /opt/otreedeploy/.venv/bin/otreedeploy-passwd</code></p>
+  {% if not retention.backups and not retention.uploads %}
+  <div class="msg warn">{{ t("No retention period is set: backups and uploaded files are kept until someone deletes them. Backups are full copies of participants' data.") }}</div>
   {% endif %}
+  <form method="post" action="/system/retention" class="actions">
+    <label>{{ t("Delete backups after") }}
+      <input type="number" name="backups" min="1" style="width:6em" value="{{ retention.backups or '' }}"> {{ t("days") }}</label>
+    <label>{{ t("Delete uploaded files after") }}
+      <input type="number" name="uploads" min="1" style="width:6em" value="{{ retention.uploads or '' }}"> {{ t("days") }}</label>
+    <button class="btn">{{ t("Save") }}</button>
+  </form>
+  <p class="hint">{{ t("Empty means keep. Checked every hour; each deletion is recorded below. The newest backup of every existing experiment is always kept.") }}</p>
+</div>
+
+{% if deleted %}
+<h2>{{ t("Deleted experiments") }}</h2>
+<div class="panel tight">
+  <p class="hint" style="padding:0 12px">{{ t("Backups and uploads set aside when an experiment was deleted. On the server under {path}.", path=settings.backups_dir ~ '/_deleted') }}</p>
+  <table><tbody>
+  {% for d in deleted %}
+    <tr><td class="mono">{{ d.name }}</td><td>{{ d.files }} · {{ d.size | filesize }}</td>
+      <td style="text-align:right">
+        <form method="post" action="/system/deleted/remove" class="actions"
+              onsubmit="return confirm({{ t('Delete what is left of {name}, for good?', name=d.name) | tojson }})">
+          <input type="hidden" name="name" value="{{ d.name }}">
+          <input type="text" name="confirm" placeholder="{{ d.name }}" autocomplete="off" style="width:12em">
+          <button class="btn danger small">{{ t("Delete for good") }}</button>
+        </form>
+      </td></tr>
+  {% endfor %}
+  </tbody></table>
+</div>
+{% endif %}
+
+<h2>{{ t("Audit trail") }}</h2>
+<div class="panel tight">
+  <form method="get" action="/system" class="actions" style="padding:8px 12px">
+    <input name="project" placeholder="{{ t('project') }}" value="{{ audit_filter.project }}">
+    <input name="user" placeholder="{{ t('user') }}" value="{{ audit_filter.user }}">
+    <button class="btn small">{{ t("Filter") }}</button>
+  </form>
+  <table><tbody>
+  {% for e in audit_entries %}
+    <tr><td style="white-space:nowrap;color:var(--muted)">{{ e.at | datetime }}</td>
+      <td class="mono">{{ e.user }}</td><td class="mono">{{ e.project }}</td>
+      <td>{{ e.action }}{% if e.detail %}: {{ e.detail }}{% endif %}</td>
+      <td style="color:var(--muted)">{{ e.client }}</td></tr>
+  {% else %}
+    <tr><td class="empty">{{ t("Nothing recorded yet.") }}</td></tr>
+  {% endfor %}
+  </tbody></table>
+  <p class="hint" style="padding:0 12px">{{ t("Kept in the system journal, where neither this app nor the experiments can change it. How long it is kept is the system's journal setting.") }}</p>
 </div>
 
 <h2>{{ t("Activity") }}</h2>

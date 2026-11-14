@@ -11,11 +11,14 @@
 <header class="top">
   <div class="inner">
     <a class="brand" href="/">🧪 otreedeploy</a>
-    {% if signed_in or not auth_required %}
+    {% if user %}
     <nav>
       <a href="/" class="{{ 'on' if page == 'projects' }}">{{ t("Projects") }}</a>
       <a href="/upload" class="{{ 'on' if page == 'upload' }}">{{ t("Upload") }}</a>
+      {% if is_admin %}
+      <a href="/users" class="{{ 'on' if page == 'users' }}">{{ t("Users") }}</a>
       <a href="/system" class="{{ 'on' if page == 'system' }}">{{ t("System") }}</a>
+      {% endif %}
     </nav>
     {% endif %}
     <nav class="lang" aria-label="{{ t('Language') }}">
@@ -27,6 +30,7 @@
       {% endfor %}
     </nav>
     {% if signed_in %}
+    <a class="whoami" href="/account" title="{{ t('Your account') }}">{{ user.name }}</a>
     <form class="signout" method="post" action="/logout">
       <button type="submit">{{ t("Sign out") }}</button>
     </form>
@@ -34,13 +38,6 @@
   </div>
 </header>
 <main>
-  {% if not auth_required and not dry_run %}
-  <div class="msg warn">
-    <strong>{{ t("No password is set.") }}</strong>
-    {{ t("Anyone who can reach this page can stop an experiment or download its data. Set one on the server:") }}
-    <code class="mono">sudo -u otreedeploy /opt/otreedeploy/.venv/bin/otreedeploy-passwd</code>
-  </div>
-  {% endif %}
   {% if error %}<div class="msg bad">{{ msg(error) }}</div>{% endif %}
   {% if notice %}<div class="msg ok">{{ msg(notice) }}</div>{% endif %}
   {% block body %}{% endblock %}

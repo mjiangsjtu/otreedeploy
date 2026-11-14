@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Callable, Iterator
 
 from . import (
+    accounts,
     archive,
     builder,
     config,
@@ -62,6 +63,7 @@ class Job:
     title: str = "Deploying"
     lines: list[str] = field(default_factory=list)
     status: str = "running"  # running | success | failed | blocked | live_down
+    user: str | None = None  # who started it; they may follow it even before membership
     # Set when the failure took the live experiment down with it, so the page does not
     # tell the experimenter that "nothing was changed for participants".
     live_down: bool = False
@@ -112,8 +114,8 @@ _jobs: dict[str, Job] = {}
 _jobs_lock = threading.Lock()
 
 
-def new_job(title: str, slug: str | None = None) -> Job:
-    job = Job(id=uuid.uuid4().hex[:12], slug=slug, title=title)
+def new_job(title: str, slug: str | None = None, user: str | None = None) -> Job:
+    job = Job(id=uuid.uuid4().hex[:12], slug=slug, title=title, user=user)
     with _jobs_lock:
         _jobs[job.id] = job
         # Keep the registry from growing without bound across a long-lived process.
@@ -629,20 +631,47 @@ def restore_backup(slug: str, name: str, force: bool = False) -> Path | None:
     return snapshot
 
 
-def delete_project(slug: str, force: bool = False) -> Path | None:
-    """Remove a project entirely, after one last backup."""
+def delete_project(slug: str, force: bool = False, purge: bool = False) -> Path | None:
+    """Remove a project entirely.
+
+    Without ``purge``, one last backup is taken, and the project's backups and stored
+    uploads move to ``backups/_deleted/<slug>-<time>/``: out of reach of a new project
+    that reuses the name, visible to admins, and subject to the retention periods.
+    Returns where that last backup now is.
+
+    With ``purge``, nothing of the project's data is kept -- no last backup, no
+    earlier backups, no uploads. That is what a request to erase the data needs.
+    """
     projects.validate(slug)
     guard_disruption(slug, force)
 
-    snapshot = backup(slug, "before-delete")
+    snapshot = None if purge else backup(slug, "before-delete")
     otreeapi.pool.release(slug)
     if systemd.is_active(slug):
         systemd.stop(slug)
     if systemd.is_enabled(slug):
         systemd.disable(slug)
 
-    # Database, role, system user, unit identity and files. Backups stay.
+    # Database, role, system user, unit identity and files.
     sandbox.unprovision(slug)
     db.delete_project(slug)
-    db.log_event("delete", f"project deleted (backup: {snapshot})", slug)
+    accounts.forget_project(slug)
+
+    settings = config.get_settings()
+    kept = [d for d in (settings.backup_dir(slug), settings.upload_dir(slug)) if d.exists()]
+    if purge:
+        for directory in kept:
+            shutil.rmtree(directory)
+        db.log_event("delete", "project deleted, with all its backups and uploads", slug)
+        return None
+
+    archive = settings.backups_dir / "_deleted" / f"{slug}-{time.strftime('%Y%m%d-%H%M%S')}"
+    archive.mkdir(parents=True)
+    for directory, name in ((settings.backup_dir(slug), "backups"),
+                            (settings.upload_dir(slug), "uploads")):
+        if directory.exists():
+            directory.rename(archive / name)
+    if snapshot is not None:
+        snapshot = archive / "backups" / snapshot.name
+    db.log_event("delete", f"project deleted (backups kept in {archive.name})", slug)
     return snapshot

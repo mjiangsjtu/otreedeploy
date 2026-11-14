@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% set page = 'account' %}
+{% block title %}{{ t("Your account") }} — otreedeploy{% endblock %}
+{% block body %}
+<h1>{{ user.name }}</h1>
+<p class="sub">
+  {% if user.is_admin %}{{ t("Admin: you can see every project and manage accounts.") }}
+  {% else %}{{ t("You can see and manage the projects you are a member of.") }}{% endif %}
+</p>
+
+<div class="grid2">
+  <div>
+    <h2>{{ t("Change your password") }}</h2>
+    <form class="panel passwd" method="post" action="/account/password">
+      <div class="field">
+        <label for="current_password">{{ t("Current password") }}</label>
+        <input id="current_password" type="password" name="current_password" required
+               autocomplete="current-password">
+      </div>
+      <div class="field">
+        <label for="new_password">{{ t("New password") }}</label>
+        <input id="new_password" type="password" name="new_password" required
+               minlength="{{ min_password_length }}" autocomplete="new-password">
+      </div>
+      <div class="field">
+        <label for="confirm_password">{{ t("Repeat it") }}</label>
+        <input id="confirm_password" type="password" name="confirm_password" required
+               minlength="{{ min_password_length }}" autocomplete="new-password">
+      </div>
+      <button class="btn" type="submit">{{ t("Change password") }}</button>
+      <p class="hint">{{ t("At least {n} characters. Changing it signs you out everywhere else.", n=min_password_length) }}</p>
+    </form>
+  </div>
+  <div>
+    <h2>{{ t("Your projects") }}</h2>
+    <div class="panel">
+      {% for slug in projects %}
+        <a class="mono" href="/p/{{ slug }}">{{ slug }}</a>{{ ", " if not loop.last }}
+      {% else %}
+        <p class="hint">{{ t("None yet. Upload one, or ask a project's members to add you.") }}</p>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+{% endblock %}

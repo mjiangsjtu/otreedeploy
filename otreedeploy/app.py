@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
+import contextvars
 import shutil
 import tempfile
 import threading
@@ -25,6 +26,7 @@ from urllib.parse import quote, urlencode
 from fastapi import FastAPI, Form, Request, UploadFile
 from fastapi.responses import (
     HTMLResponse,
+    FileResponse,
     PlainTextResponse,
     RedirectResponse,
     Response,
@@ -34,6 +36,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from . import (
+    access,
+    accounts,
+    audit,
     auth,
     config,
     db,
@@ -44,6 +49,7 @@ from . import (
     otreeapi,
     postgres,
     projects,
+    retention,
     sandbox,
     systemd,
 )
@@ -86,18 +92,12 @@ def _i18n_context(request) -> dict:
 
 
 def _auth_context(request) -> dict:
-    """What every page needs to know about signing in.
-
-    ``auth_required`` is false only until somebody sets a password, which bootstrap.sh
-    does; the templates use it to keep nagging until that happens.
-    """
-    try:
-        signed_in = auth.check_token(request.cookies.get(auth.COOKIE))
-    except auth.AuthError:
-        signed_in = False
+    """Who is signed in, for every page."""
+    user = access.current_user(request)
     return {
-        "auth_required": auth.is_configured(),
-        "signed_in": signed_in,
+        "user": user,
+        "signed_in": user is not None and user is not accounts.DEV_USER,
+        "is_admin": bool(user and user.is_admin),
         "dry_run": config.dry_run(),
     }
 
@@ -121,9 +121,30 @@ templates.env.globals["otree_port"] = config.otree_port
 templates.env.globals["experiment_origin"] = _experiment_origin
 templates.env.globals["min_password_length"] = auth.MIN_PASSWORD_LENGTH
 
+
+def _user(request: Request) -> accounts.User:
+    """The signed-in user. Routes only run once ``access.EnforceAccess`` found one."""
+    user = access.current_user(request)
+    assert user is not None
+    return user
+
+
+def _client(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+def _audit(request: Request, action: str, slug: str | None = None, detail: str = "") -> None:
+    user = access.current_user(request)
+    audit.record(action, user.name if user else None, slug, detail, client=_client(request))
+
 @asynccontextmanager
 async def _lifespan(_: FastAPI):
     db.init()
+    try:
+        accounts.init()
+    except accounts.AccountError:
+        pass  # reported on every request by access.EnforceAccess, which stays locked
+    retention.start_sweeper()
     # Private boots (smoke tests, exports) are transient units, not our children: a
     # crash or restart of this app would otherwise leave them holding ports.
     sandbox.unboot_all()
@@ -135,10 +156,11 @@ async def _lifespan(_: FastAPI):
         systemd.reset_fake_state()
 
 
-app = FastAPI(title="otreedeploy", docs_url=None, redoc_url=None, lifespan=_lifespan)
+app = FastAPI(title="otreedeploy", docs_url=None, redoc_url=None, openapi_url=None,
+              lifespan=_lifespan)
 # Wraps every route and the static mount, so a page added later is protected by default
 # rather than by remembering to protect it.
-app.add_middleware(auth.RequireLogin)
+app.add_middleware(access.EnforceAccess)
 # Added last, so it runs first: a forged write is refused before anything else.
 app.add_middleware(auth.SameOriginWrites)
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
@@ -208,10 +230,20 @@ def _render(request: Request, template: str, **context) -> HTMLResponse:
     # A message the handler passes directly is trusted; one from the URL must verify.
     for kind, message in _signed_messages(request).items():
         context.setdefault(kind, message)
+    # Which project holds port 80 is shown by name only to those who may see it; others
+    # learn that another group's experiment is live, and whom to ask about it.
+    active = deploy.active_slug()
+    user = access.current_user(request)
+    hidden = bool(active and not accounts.can_access(user, active))
     return templates.TemplateResponse(
         request=request,
         name=template,
-        context={"active_slug": deploy.active_slug(), **context},
+        context={
+            "active_slug": None if hidden else active,
+            "other_live": hidden,
+            "live_contacts": ", ".join(accounts.members_of(active)) if hidden else "",
+            **context,
+        },
     )
 
 
@@ -280,13 +312,16 @@ def _handle(action, slug: str, success: str):
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
+    user = _user(request)
     active = deploy.active_slug()
-    overviews = [_overview(p.slug, active=active) for p in db.list_projects()]
+    visible = [p for p in db.list_projects() if accounts.can_access(user, p.slug)]
+    overviews = [_overview(p.slug, active=active) for p in visible]
     return _render(
         request,
         "index.html",
         overviews=overviews,
-        events=db.recent_events(limit=8),
+        events=[e for e in db.recent_events(limit=30)
+                if e["slug"] is None and user.is_admin or accounts.can_access(user, e["slug"])][:8],
     )
 
 
@@ -312,7 +347,7 @@ def set_language(code: str, request: Request, next: str = "/"):
 
 @app.get("/login", response_class=HTMLResponse)
 def login_form(request: Request, next: str = "/"):
-    if not auth.is_configured() or auth.check_token(request.cookies.get(auth.COOKIE)):
+    if access.current_user(request) is not None:
         return RedirectResponse(auth.safe_next(next), status_code=303)
     return _render(request, "login.html", next=auth.safe_next(next))
 
@@ -320,90 +355,94 @@ def login_form(request: Request, next: str = "/"):
 @app.post("/login")
 def login(
     request: Request,
+    username: str = Form(default=""),
     password: str = Form(default=""),
     next: str = Form(default="/"),
 ):
     target = auth.safe_next(next)
-    if not auth.is_configured():
-        return RedirectResponse(target, status_code=303)
-
-    client = request.client.host if request.client else "unknown"
-    wait = auth.locked_for(client)
+    name = username.strip().lower()
+    # Keyed on address and name together: one person's typos lock out only that name
+    # from that machine, not every colleague in the room.
+    key = f"{_client(request)}|{name}"
+    wait = auth.locked_for(key)
     if wait:
         return _render(
             request,
             "login.html",
             next=target,
+            username=name,
             error=_msg(request, "too many attempts; try again in {n} seconds", n=wait),
         )
 
-    if not auth.verify_password(password):
-        auth.note_failure(client)
-        return _render(request, "login.html", next=target, error="wrong password")
+    user = accounts.verify(name, password)
+    if user is None:
+        auth.note_failure(key)
+        audit.record("sign_in_failed", name or "-", None, client=_client(request))
+        return _render(request, "login.html", next=target, username=name,
+                       error="wrong user name or password")
 
-    auth.note_success(client)
+    auth.note_success(key)
+    audit.record("sign_in", user.name, None, client=_client(request))
     response = RedirectResponse(target, status_code=303)
-    _set_session(response)
+    _set_session(response, accounts.start_session(user.name))
     return response
 
 
 @app.post("/logout")
-def logout():
+def logout(request: Request):
+    user = access.current_user(request)
+    accounts.end_session(request.cookies.get(access.COOKIE))
+    if user is not None and user is not accounts.DEV_USER:
+        _audit(request, "sign_out")
     response = RedirectResponse("/login", status_code=303)
-    response.delete_cookie(auth.COOKIE, path="/")
+    response.delete_cookie(access.COOKIE, path="/")
     return response
 
 
-def _set_session(response: Response) -> None:
+def _set_session(response: Response, token: str) -> None:
     response.set_cookie(
-        auth.COOKIE,
-        auth.issue_token(),
-        max_age=auth.SESSION_MAX_AGE,
+        access.COOKIE,
+        token,
+        max_age=accounts.SESSION_MAX_AGE,
         httponly=True,
         samesite="lax",
         path="/",
     )
 
 
-@app.post("/password")
+@app.get("/account", response_class=HTMLResponse)
+def account_page(request: Request):
+    user = _user(request)
+    projects_ = sorted(accounts.projects_of(user.name))
+    return _render(request, "account.html", projects=projects_)
+
+
+@app.post("/account/password")
 def change_password(
     request: Request,
     current_password: str = Form(default=""),
     new_password: str = Form(default=""),
     confirm_password: str = Form(default=""),
 ):
-    """Change the password from the System page.
-
-    The first password is never set here: until one exists the app is open, so anyone on
-    the network could set one and lock the experimenter out. That one has to be set on
-    the box, which is what bootstrap.sh does.
-    """
-    if not auth.is_configured():
-        return _system_back("no password is set yet; set the first one on the server", error=True)
-    if not auth.verify_password(current_password):
-        return _system_back("the current password is not right", error=True)
+    """Change your own password. Every other session of yours ends."""
+    user = _user(request)
+    back = lambda message, error=False: RedirectResponse(  # noqa: E731
+        _with_message("/account", message, error), status_code=303)
+    if user is accounts.DEV_USER:
+        return back("a dry run without accounts has no password to change", error=True)
+    if accounts.verify(user.name, current_password) is None:
+        return back("the current password is not right", error=True)
     if new_password != confirm_password:
-        return _system_back("the new passwords did not match", error=True)
-    if len(new_password) < auth.MIN_PASSWORD_LENGTH:
-        return _system_back(
-            _msg(
-                request,
-                "the password must be at least {n} characters long",
-                n=auth.MIN_PASSWORD_LENGTH,
-            ),
-            error=True,
-        )
+        return back("the new passwords did not match", error=True)
     try:
-        auth.set_password(new_password)
-    except (ValueError, OSError) as exc:
-        return _system_back(str(exc), error=True)
-
-    auth.reset_rate_limits()
-    # Changing the password rotates the signing secret, so this browser's cookie died
-    # along with everyone else's. Hand it a fresh one rather than bouncing the person
-    # who just proved they know the password.
-    response = _system_back("password changed; every other browser has been signed out")
-    _set_session(response)
+        accounts.set_password(user.name, new_password)
+    except accounts.AccountError as exc:
+        return back(str(exc), error=True)
+    _audit(request, "password_changed")
+    response = back("password changed; your other sessions have been signed out")
+    # Changing the password ended every session of this user, this one included; hand
+    # this browser a fresh one rather than bouncing the person who just proved it.
+    _set_session(response, accounts.start_session(user.name))
     return response
 
 
@@ -417,6 +456,8 @@ def _system_back(message: str, error: bool = False) -> RedirectResponse:
 @app.get("/upload", response_class=HTMLResponse)
 def upload_form(request: Request, slug: str | None = None):
     project = _project_or_404(slug or "")
+    if project is not None and not accounts.can_access(_user(request), project.slug):
+        return _back(None, "there is no such project", error=True)
     participants = (
         postgres.count_active_participants(project.slug)
         if project and deploy.status_of(project.slug) == "running"
@@ -435,6 +476,25 @@ async def upload(
     force: bool = Form(default=False),
 ):
     filename = file.filename or "project.otreezip"
+    user = _user(request)
+    slug = (slug or "").strip() or None
+    if slug is not None:
+        # A new version of an existing project: only its members may replace its code.
+        if not accounts.can_access(user, slug) or db.get_project(slug) is None:
+            await file.close()
+            return _back(None, "there is no such project", error=True)
+    else:
+        # A new upload is named after its file. If that name belongs to a project this
+        # person is a member of, it is a new version of it (as before accounts); if it
+        # belongs to somebody else's, this becomes a separate project rather than
+        # touching theirs -- and without saying whose name was taken.
+        existing = {p.slug for p in db.list_projects()}
+        desired = projects.slugify(filename)
+        if desired in existing and accounts.can_access(user, desired):
+            slug = desired
+        else:
+            slug = projects.unique_slug(desired, existing)
+    is_new = db.get_project(slug) is None
 
     # Stream to disk rather than into memory: these are whole projects.
     tmp_dir = Path(tempfile.mkdtemp(prefix="otreedeploy-upload-"))
@@ -460,12 +520,15 @@ async def upload(
         shutil.rmtree(tmp_dir, ignore_errors=True)
         return _back(slug, "no file was uploaded", error=True)
 
-    job = deploy.new_job(f"Deploying {filename}", slug)
+    job = deploy.new_job(f"Deploying {filename}", slug, user=user.name)
+    if is_new and user is not accounts.DEV_USER:
+        accounts.grant(user.name, slug)
+    _audit(request, "upload", slug, f"{filename} ({size} bytes)" + (" (forced)" if force else ""))
 
     def run() -> None:
         try:
             job.log(f"Received {filename} ({size / 1024:.0f} KB)")
-            deploy.deploy(job, tmp_path, filename, slug=slug or None, force=force)
+            deploy.deploy(job, tmp_path, filename, slug=slug, force=force)
             job.log("")
             job.log("Done.")
             job.finish("success")
@@ -484,21 +547,34 @@ async def upload(
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    threading.Thread(target=run, daemon=True).start()
+    # The deploy's history entries are attributed to whoever started it.
+    context = contextvars.copy_context()
+    threading.Thread(target=context.run, args=(run,), daemon=True).start()
     return RedirectResponse(f"/jobs/{job.id}", status_code=303)
+
+
+def _job_for(request: Request, job_id: str) -> deploy.Job | None:
+    """A deploy log, if this user may see it: the one who started it, or a member."""
+    job = deploy.get_job(job_id)
+    user = _user(request)
+    if job is None:
+        return None
+    if job.user == user.name or accounts.can_access(user, job.slug):
+        return job
+    return None
 
 
 @app.get("/jobs/{job_id}", response_class=HTMLResponse)
 def job_page(request: Request, job_id: str):
-    job = deploy.get_job(job_id)
+    job = _job_for(request, job_id)
     if job is None:
         return _back(None, "that deploy log has expired", error=True)
     return _render(request, "job.html", job=job)
 
 
 @app.get("/jobs/{job_id}/stream")
-def job_stream(job_id: str):
-    job = deploy.get_job(job_id)
+def job_stream(request: Request, job_id: str):
+    job = _job_for(request, job_id)
     if job is None:
         return PlainTextResponse("unknown job", status_code=404)
 
@@ -523,8 +599,19 @@ def project_page(request: Request, slug: str):
         backups=_backups(slug),
         auth_levels=environment.AUTH_LEVELS,
         incumbent_participants=_incumbent_participants(slug),
+        may_force_incumbent=_may_force_incumbent(request, slug),
+        members=accounts.members_of(slug),
+        addable=[u.name for u in accounts.list_users()
+                 if not u.disabled and u.name not in accounts.members_of(slug)],
+        history=audit.read(limit=30, project=slug),
         **_overview(slug),
     )
+
+
+def _may_force_incumbent(request: Request, slug: str) -> bool:
+    """Interrupting the live project's participants is a decision for its own people."""
+    incumbent = deploy.active_slug()
+    return not incumbent or incumbent == slug or accounts.can_access(_user(request), incumbent)
 
 
 def _incumbent_participants(slug: str) -> int:
@@ -556,8 +643,24 @@ def _backups(slug: str) -> list[dict]:
 # ------------------------------------------------------------------------- lifecycle
 
 
+def _forced(force: bool) -> str:
+    return " (overriding the participant guard)" if force else ""
+
+
 @app.post("/p/{slug}/activate")
-def activate(slug: str, force: bool = Form(default=False)):
+def activate(request: Request, slug: str, force: bool = Form(default=False)):
+    incumbent = deploy.active_slug()
+    if force and not _may_force_incumbent(request, slug):
+        contacts = ", ".join(accounts.members_of(incumbent)) or "an admin"
+        return _back(
+            slug,
+            "the live experiment belongs to another group, and only its members can "
+            f"interrupt its participants. Ask one of them ({contacts}), or wait until "
+            "nobody is active",
+            error=True,
+        )
+    _audit(request, "activate", slug,
+           (f"replacing {incumbent}" if incumbent and incumbent != slug else "") + _forced(force))
     return _handle(
         lambda: deploy.activate(slug, force=force),
         slug,
@@ -566,17 +669,21 @@ def activate(slug: str, force: bool = Form(default=False)):
 
 
 @app.post("/p/{slug}/stop")
-def stop(slug: str, force: bool = Form(default=False)):
+def stop(request: Request, slug: str, force: bool = Form(default=False)):
+    _audit(request, "stop", slug, _forced(force))
     return _handle(lambda: deploy.stop(slug, force=force), slug, "stopped")
 
 
 @app.post("/p/{slug}/restart")
-def restart(slug: str, force: bool = Form(default=False)):
+def restart(request: Request, slug: str, force: bool = Form(default=False)):
+    _audit(request, "restart", slug, _forced(force))
     return _handle(lambda: deploy.restart(slug, force=force), slug, "restarted")
 
 
 @app.post("/p/{slug}/rollback")
-def rollback(slug: str, release: str = Form(...), force: bool = Form(default=False)):
+def rollback(request: Request, slug: str, release: str = Form(...),
+             force: bool = Form(default=False)):
+    _audit(request, "rollback", slug, f"to {release}{_forced(force)}")
     return _handle(
         lambda: deploy.rollback(slug, release, force=force),
         slug,
@@ -586,6 +693,7 @@ def rollback(slug: str, release: str = Form(...), force: bool = Form(default=Fal
 
 @app.post("/p/{slug}/settings")
 def update_settings(
+    request: Request,
     slug: str,
     display_name: str = Form(...),
     admin_password: str = Form(...),
@@ -608,6 +716,7 @@ def update_settings(
     updated = db.get_project(slug)
     assert updated is not None
     environment.write(updated)
+    _audit(request, "settings", slug, f"access level {auth_level}")
     otreeapi.pool.release(slug)
 
     if deploy.status_of(slug) == "running":
@@ -618,11 +727,13 @@ def update_settings(
 
 
 @app.post("/p/{slug}/reset-db")
-def reset_db(slug: str, confirm: str = Form(default=""), force: bool = Form(default=False)):
+def reset_db(request: Request, slug: str, confirm: str = Form(default=""),
+             force: bool = Form(default=False)):
     if confirm.strip() != slug:
         return _back(
             slug, "type the project name exactly to confirm the reset", error=True
         )
+    _audit(request, "reset_database", slug, _forced(force))
     try:
         snapshot = deploy.reset_database(slug, force=force)
     except ParticipantsActive as exc:
@@ -635,6 +746,7 @@ def reset_db(slug: str, confirm: str = Form(default=""), force: bool = Form(defa
 
 @app.post("/p/{slug}/restore")
 def restore_backup(
+    request: Request,
     slug: str,
     backup: str = Form(default=""),
     confirm: str = Form(default=""),
@@ -642,6 +754,7 @@ def restore_backup(
 ):
     if confirm.strip() != slug:
         return _back(slug, "type the project name exactly to confirm the restore", error=True)
+    _audit(request, "restore", slug, backup + _forced(force))
     try:
         snapshot = deploy.restore_backup(slug, backup, force=force)
     except ParticipantsActive as exc:
@@ -653,19 +766,54 @@ def restore_backup(
 
 
 @app.post("/p/{slug}/delete")
-def delete(slug: str, confirm: str = Form(default=""), force: bool = Form(default=False)):
+def delete(
+    request: Request,
+    slug: str,
+    confirm: str = Form(default=""),
+    force: bool = Form(default=False),
+    purge: bool = Form(default=False),
+    confirm_purge: str = Form(default=""),
+):
     if confirm.strip() != slug:
         return _back(
             slug, "type the project name exactly to confirm deletion", error=True
         )
+    if purge and confirm_purge.strip() != "delete all data":
+        return _back(
+            slug,
+            "to delete the backups and uploads as well, also type: delete all data",
+            error=True,
+        )
+    _audit(request, "delete", slug,
+           ("including all backups and uploads" if purge else "backups kept") + _forced(force))
     try:
-        snapshot = deploy.delete_project(slug, force=force)
+        snapshot = deploy.delete_project(slug, force=force, purge=purge)
     except ParticipantsActive as exc:
         return _back(slug, str(exc), error=True)
     except (DeployError, postgres.PostgresError) as exc:
         return _back(slug, str(exc), error=True)
-    where = f" A final backup was kept as {Path(snapshot).name}." if snapshot else ""
+    if purge:
+        return _back(None, f"deleted '{slug}' and every backup and upload of it.")
+    where = (f" A final backup was kept as {Path(snapshot).name}; an admin can find it "
+             "under deleted projects on the System page.") if snapshot else ""
     return _back(None, f"deleted '{slug}'.{where}")
+
+
+@app.post("/p/{slug}/members/add")
+def add_member(request: Request, slug: str, name: str = Form(default="")):
+    try:
+        accounts.grant(name.strip(), slug)
+    except accounts.AccountError as exc:
+        return _back(slug, str(exc), error=True)
+    _audit(request, "access_granted", slug, name)
+    return _back(slug, f"{name} can now see and manage this project")
+
+
+@app.post("/p/{slug}/members/remove")
+def remove_member(request: Request, slug: str, name: str = Form(default="")):
+    accounts.revoke(name, slug)
+    _audit(request, "access_revoked", slug, name)
+    return _back(slug, f"{name} no longer has access to this project")
 
 
 # ------------------------------------------------------------------------------ logs
@@ -718,7 +866,7 @@ def data_page(request: Request, slug: str):
 
 
 @app.get("/p/{slug}/data/{kind}.csv")
-def download_csv(slug: str, kind: str, session_code: str | None = None):
+def download_csv(request: Request, slug: str, kind: str, session_code: str | None = None):
     """Export data from any project, running or not.
 
     If the project is not the live one, it is booted on a loopback port just long
@@ -748,6 +896,8 @@ def download_csv(slug: str, kind: str, session_code: str | None = None):
 
     suffix = f"-{session_code}" if session_code else ""
     filename = f"{slug}-{stem}{suffix}-{time.strftime('%Y%m%d')}.csv"
+    _audit(request, "download_data", slug,
+           f"{kind}" + (f", session {session_code}" if session_code else ", all sessions"))
     return Response(
         content=body,
         media_type="text/csv",
@@ -756,19 +906,17 @@ def download_csv(slug: str, kind: str, session_code: str | None = None):
 
 
 @app.get("/p/{slug}/backups/{name}")
-def download_backup(slug: str, name: str):
+def download_backup(request: Request, slug: str, name: str):
     if _project_or_404(slug) is None:
         return PlainTextResponse("unknown project", status_code=404)
     directory = config.get_settings().backup_dir(slug)
     target = (directory / name).resolve()
     # Never let a crafted name walk out of the backup directory.
-    if not str(target).startswith(str(directory.resolve()) + "/") or not target.is_file():
+    if not target.is_relative_to(directory.resolve()) or not target.is_file():
         return PlainTextResponse("no such backup", status_code=404)
-    return Response(
-        content=target.read_bytes(),
-        media_type="application/gzip",
-        headers={"Content-Disposition": f'attachment; filename="{name}"'},
-    )
+    _audit(request, "download_backup", slug, name)
+    # Streamed from disk, not read into memory: a backup can be large (N4).
+    return FileResponse(target, media_type="application/gzip", filename=name)
 
 
 # ----------------------------------------------------------------------------- system
@@ -799,4 +947,110 @@ def system(request: Request):
         dry_run=config.dry_run(),
         settings=config.get_settings(),
         events=db.recent_events(limit=40),
+        retention=retention.get(),
+        deleted=retention.deleted_archives(),
+        audit_entries=audit.read(
+            limit=200,
+            project=request.query_params.get("project") or None,
+            user=request.query_params.get("user") or None,
+        ),
+        audit_filter={"project": request.query_params.get("project", ""),
+                      "user": request.query_params.get("user", "")},
     )
+
+
+def _days(value: str) -> int | None:
+    value = value.strip()
+    return int(value) if value else None
+
+
+@app.post("/system/retention")
+def set_retention(request: Request, backups: str = Form(default=""), uploads: str = Form(default="")):
+    try:
+        retention.set_periods(_days(backups), _days(uploads))
+    except ValueError as exc:
+        return _system_back(f"not saved: {exc}", error=True)
+    _audit(request, "retention_set", None, f"backups {backups or 'keep'}, uploads {uploads or 'keep'}")
+    removed = retention.sweep()
+    return _system_back(f"retention saved; {len(removed)} file(s) past it were deleted")
+
+
+@app.post("/system/deleted/remove")
+def remove_deleted(request: Request, name: str = Form(default=""),
+                   confirm: str = Form(default="")):
+    if confirm.strip() != name:
+        return _system_back("type the name exactly to confirm", error=True)
+    try:
+        retention.remove_archive(name)
+    except ValueError as exc:
+        return _system_back(str(exc), error=True)
+    _audit(request, "delete_archive", None, name)
+    return _system_back(f"deleted the remaining backups and uploads of {name}")
+
+
+# ------------------------------------------------------------------------------ users
+
+
+@app.get("/users", response_class=HTMLResponse)
+def users_page(request: Request):
+    rows = [{"user": u, "projects": sorted(accounts.projects_of(u.name))}
+            for u in accounts.list_users()]
+    return _render(request, "users.html", rows=rows, one_time=None)
+
+
+def _users_back(message: str, error: bool = False) -> RedirectResponse:
+    return RedirectResponse(_with_message("/users", message, error), status_code=303)
+
+
+def _one_time(request: Request, name: str, password: str, message: str) -> HTMLResponse:
+    """Show a generated password exactly once, on this page, never in a URL."""
+    rows = [{"user": u, "projects": sorted(accounts.projects_of(u.name))}
+            for u in accounts.list_users()]
+    return _render(request, "users.html", rows=rows,
+                   one_time={"name": name, "password": password}, notice=message)
+
+
+@app.post("/users/add")
+def add_user(request: Request, name: str = Form(default=""),
+             is_admin: bool = Form(default=False)):
+    name = name.strip().lower()
+    password = accounts.generate_password()
+    try:
+        accounts.create_user(name, password, is_admin=is_admin)
+    except accounts.AccountError as exc:
+        return _users_back(str(exc), error=True)
+    _audit(request, "user_created", None, name + (" (admin)" if is_admin else ""))
+    return _one_time(request, name, password, f"created {name}")
+
+
+@app.post("/users/{name}/password")
+def reset_user_password(request: Request, name: str):
+    password = accounts.generate_password()
+    try:
+        accounts.set_password(name, password)
+    except accounts.AccountError as exc:
+        return _users_back(str(exc), error=True)
+    _audit(request, "user_password_reset", None, name)
+    return _one_time(request, name, password, f"new password for {name}; their sessions have ended")
+
+
+@app.post("/users/{name}/admin")
+def set_user_admin(request: Request, name: str, on: bool = Form(default=False)):
+    try:
+        accounts.set_admin(name, on)
+    except accounts.AccountError as exc:
+        return _users_back(str(exc), error=True)
+    _audit(request, "user_admin", None, f"{name} {'on' if on else 'off'}")
+    return _users_back(f"{name} is {'now' if on else 'no longer'} an admin")
+
+
+@app.post("/users/{name}/disable")
+def set_user_disabled(request: Request, name: str, disabled: bool = Form(default=False)):
+    if disabled and name == _user(request).name:
+        return _users_back("you cannot disable your own account", error=True)
+    try:
+        accounts.set_disabled(name, disabled)
+    except accounts.AccountError as exc:
+        return _users_back(str(exc), error=True)
+    _audit(request, "user_disabled" if disabled else "user_enabled", None, name)
+    return _users_back(f"{name} is {'disabled' if disabled else 'enabled again'}")
