@@ -34,4 +34,7 @@ include = ["otreedeploy", "templates", "static", "deploy"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["slow: exercises a real uv build and a real oTree boot"]
+markers = [
+    "slow: exercises a real uv build and a real oTree boot",
+    "e2e: runs against a real systemd + PostgreSQL server in a container (OTREEDEPLOY_E2E=1)",
+]
