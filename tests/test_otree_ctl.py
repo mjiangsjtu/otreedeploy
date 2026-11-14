@@ -25,9 +25,15 @@ def ctl(tmp_path):
     )
     stub.chmod(0o755)
 
+    home = tmp_path / "srv-otree"
+    (home / "study/releases/20261114-120000").mkdir(parents=True)
+
     script = tmp_path / "otree-ctl"
     script.write_text(
-        SOURCE.read_text().replace("SYSTEMCTL=/usr/bin/systemctl", f"SYSTEMCTL={stub}")
+        SOURCE.read_text()
+        .replace("SYSTEMCTL=/usr/bin/systemctl", f"SYSTEMCTL={stub}")
+        .replace("SYSTEMD_RUN=/usr/bin/systemd-run", f"SYSTEMD_RUN={stub}")
+        .replace("OTREE_HOME=/srv/otree", f"OTREE_HOME={home}")
     )
     script.chmod(0o755)
 
@@ -37,6 +43,7 @@ def ctl(tmp_path):
         )
 
     run.log = log  # type: ignore[attr-defined]
+    run.home = home  # type: ignore[attr-defined]
     return run
 
 
@@ -120,4 +127,92 @@ def test_rejects_no_verb(ctl):
 def test_daemon_reload_takes_no_arguments(ctl):
     result = ctl("daemon-reload", "extra")
     assert result.returncode == 64
+    assert _calls(ctl) == []
+
+
+# ------------------------------------------------- verbs that run uploaded code
+
+RELEASE = "20261114-120000"
+
+
+@pytest.mark.parametrize("verb", ["build", "resetdb", "clean"])
+def test_running_uploaded_code_is_confined_to_the_projects_own_user(ctl, verb):
+    result = ctl(verb, "study", RELEASE)
+    assert result.returncode == 0, result.stderr
+    calls = _calls(ctl)
+    assert calls, "nothing was run"
+    for call in calls:
+        assert "--uid=otree_study --gid=otree_study" in call
+        for setting in ("NoNewPrivileges=yes", "ProtectSystem=strict", "PrivateTmp=yes",
+                        f"ReadWritePaths={ctl.home}/study"):
+            assert setting in call, (setting, call)
+        assert "--wait" in call
+
+
+def test_build_runs_venv_and_install_as_two_separate_confined_steps(ctl):
+    assert ctl("build", "study", RELEASE).returncode == 0
+    calls = _calls(ctl)
+    assert len(calls) == 2
+    assert calls[0].endswith("-- /usr/local/bin/uv venv .venv")
+    assert "-- /usr/local/bin/uv pip install --python" in calls[1]
+    assert calls[1].endswith("-r requirements.txt")
+
+
+def test_only_resetdb_and_boot_see_the_projects_environment_file(ctl):
+    for verb in ("build", "clean"):
+        ctl(verb, "study", RELEASE)
+    assert not any("EnvironmentFile" in c for c in _calls(ctl))
+    ctl("resetdb", "study", RELEASE)
+    assert f"EnvironmentFile={ctl.home}/study/env" in _calls(ctl)[-1]
+
+
+def test_boot_is_a_named_confined_unit_on_a_loopback_port(ctl):
+    assert ctl("boot", "study", RELEASE, "18042").returncode == 0
+    (call,) = _calls(ctl)
+    assert "--unit=otree-boot-study-18042" in call
+    assert "--uid=otree_study" in call
+    assert call.endswith("prodserver 127.0.0.1:18042")
+
+
+@pytest.mark.parametrize(
+    "release",
+    ["../../other/releases/" + RELEASE, "latest", RELEASE + ";reboot", "20261114-12000",
+     "", "20261114-999999", f"{RELEASE}/../x"],
+)
+@pytest.mark.parametrize("verb", ["build", "resetdb", "clean"])
+def test_rejects_malformed_or_missing_releases(ctl, verb, release):
+    result = ctl(verb, "study", release)
+    assert result.returncode == 64, result.stdout
+    assert _calls(ctl) == []
+
+
+def test_rejects_a_release_reached_through_a_symlink(ctl):
+    (ctl.home / "study/releases/20261114-130000").symlink_to(ctl.home / "study/releases" / RELEASE)
+    result = ctl("build", "study", "20261114-130000")
+    assert result.returncode == 64
+    assert "not canonical" in result.stderr
+    assert _calls(ctl) == []
+
+
+@pytest.mark.parametrize("port", ["80", "8000", "17999", "18900", "65535", "18001;x", "", "1e4"])
+def test_boot_and_unboot_reject_ports_outside_the_private_range(ctl, port):
+    assert ctl("boot", "study", RELEASE, port).returncode == 64
+    assert ctl("unboot", "study", port).returncode == 64
+    assert _calls(ctl) == []
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("build", "study"),
+        ("build", "study", RELEASE, "extra"),
+        ("boot", "study", RELEASE),
+        ("provision",),
+        ("provision", "study", "extra"),
+        ("unprovision", "../etc"),
+        ("unboot-all", "x"),
+    ],
+)
+def test_rejects_wrong_argument_counts_and_names(ctl, args):
+    assert ctl(*args).returncode == 64
     assert _calls(ctl) == []

@@ -1,6 +1,6 @@
 """The management web app.
 
-Server-rendered Jinja with htmx for the interactive bits and SSE for live logs. No build
+Server-rendered Jinja, plain forms, and SSE for live logs. No build
 step and no JavaScript toolchain on purpose: this has to still work in three years when
 nobody remembers how it was built.
 
@@ -44,6 +44,7 @@ from . import (
     otreeapi,
     postgres,
     projects,
+    sandbox,
     systemd,
 )
 from .archive import ArchiveError
@@ -123,6 +124,9 @@ templates.env.globals["min_password_length"] = auth.MIN_PASSWORD_LENGTH
 @asynccontextmanager
 async def _lifespan(_: FastAPI):
     db.init()
+    # Private boots (smoke tests, exports) are transient units, not our children: a
+    # crash or restart of this app would otherwise leave them holding ports.
+    sandbox.unboot_all()
     yield
     otreeapi.pool.shutdown()
     if config.dry_run_serves():
@@ -462,11 +466,11 @@ async def upload(
         except (DeployError, ArchiveError) as exc:
             job.log("")
             job.log(f"Failed: {exc}")
-            job.finish("failed", str(exc))
+            job.finish("live_down" if job.live_down else "failed", str(exc))
         except Exception as exc:  # unexpected: still needs to reach the user
             job.log("")
             job.log(f"Unexpected error: {exc!r}")
-            job.finish("failed", repr(exc))
+            job.finish("live_down" if job.live_down else "failed", repr(exc))
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 

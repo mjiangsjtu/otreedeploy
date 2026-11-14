@@ -22,6 +22,7 @@
     success: {{ t("Finished successfully.") | tojson }},
     blocked: {{ t("Stopped to protect a session in progress.") | tojson }},
     failed:  {{ t("This deploy failed. Nothing was changed for participants.") | tojson }},
+    live_down: {{ t("This deploy failed, and the live experiment could not be brought back. Participants cannot reach it right now: see the log above, then roll back or restart it from the project page.") | tojson }},
   };
 
   function append(text) {

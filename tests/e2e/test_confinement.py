@@ -31,11 +31,10 @@ def test_the_live_experiment_runs_confined(server, manager, workdir):
     live = [r for r in _probe_records(server) if "prodserver" in r["argv"]]
     assert live, "the probe did not run in the live service"
     for record in live:
-        assert record["user"] == "otree"
+        assert record["user"] == "otree_labdemo"
         assert not any(record[key] for key in FORBIDDEN), record
 
 
-@pytest.mark.xfail(strict=True, reason="M2: build, resetdb, smoke test and exports run unconfined")
 def test_uploaded_code_never_runs_with_the_management_apps_privileges(server, manager, workdir):
     _arm_probe(server)
     deploy_live(server, manager, projects.with_identity_probe(workdir), sessions=1)
@@ -46,5 +45,5 @@ def test_uploaded_code_never_runs_with_the_management_apps_privileges(server, ma
     phases = {r["phase"] for r in records}
     assert {"build", "import"} <= phases, f"probe did not run in every phase: {phases}"
     escaped = [r for r in records
-               if r["user"] != "otree" or any(r[key] for key in FORBIDDEN)]
+               if r["user"] != "otree_labdemo" or any(r[key] for key in FORBIDDEN)]
     assert not escaped, json.dumps(escaped, indent=1)

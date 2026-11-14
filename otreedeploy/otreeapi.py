@@ -22,7 +22,7 @@ from typing import Callable
 
 import httpx
 
-from . import builder, config, environment, health
+from . import builder, config, environment, health, sandbox
 from .db import Project
 
 Logger = Callable[[str], None]
@@ -41,25 +41,39 @@ class OtreeError(Exception):
 
 @dataclass
 class Instance:
-    """A project running under our own supervision on a loopback port."""
+    """A project running under our own supervision on a loopback port.
+
+    In a real install it is a transient systemd unit running as the project's own user
+    (``unit``); in a dry run, a child process of this app (``process``).
+    """
 
     slug: str
     port: int
-    process: subprocess.Popen
+    process: subprocess.Popen | None = None
+    unit: str | None = None
     last_used: float = field(default_factory=time.monotonic)
 
     @property
     def alive(self) -> bool:
-        return self.process.poll() is None
+        if self.unit:
+            return sandbox.boot_alive(self.unit)
+        return self.process is not None and self.process.poll() is None
 
     def stop(self) -> None:
+        if self.unit:
+            # Stopping the unit stops every process in it, worker included.
+            sandbox.unboot(self.slug, self.port)
+            return
+        self._stop_process()
+
+    def _stop_process(self) -> None:
         """Terminate the whole process group.
 
         `otree prodserver` forks `otree timeoutsubprocess` as a child, so signalling only
         the parent would leave that child holding the port and a database connection.
         We start each instance in its own session precisely so we can signal the group.
         """
-        if self.process.poll() is not None:
+        if self.process is None or self.process.poll() is not None:
             return
         try:
             group = os.getpgid(self.process.pid)
@@ -99,6 +113,8 @@ def launch(
         raise OtreeError(
             f"the release at {release_dir} has no virtualenv; it was never built"
         )
+    if not config.dry_run():
+        return _launch_confined(project, release_dir, port, log)
 
     process = subprocess.Popen(
         [str(otree), "prodserver", f"{host}:{port}"],
@@ -141,6 +157,44 @@ def launch(
             f"{config.BOOT_TIMEOUT_SECONDS}s. Output:\n{tail}"
         )
     return instance
+
+
+def _launch_confined(
+    project: Project, release_dir: Path, port: int, log: Logger | None
+) -> Instance:
+    """Boot as the project's own user, in a transient unit, and wait until it answers."""
+    unit = None
+    for attempt in range(5):
+        if attempt:
+            port = health.free_port(*config.EPHEMERAL_PORT_RANGE)
+        try:
+            unit = sandbox.boot(project.slug, release_dir, port)
+            break
+        except sandbox.SandboxError as exc:
+            # The unit is named after its port, so a port another boot already holds
+            # is refused by systemd itself; try another one.
+            if "already" not in str(exc).lower() or attempt == 4:
+                raise OtreeError(f"could not start the project: {exc}") from exc
+    assert unit is not None
+
+    instance = Instance(slug=project.slug, port=port, unit=unit)
+    ready = health.wait_until_ready(
+        port, host="127.0.0.1", should_continue=lambda: sandbox.boot_alive(unit)
+    )
+    if ready:
+        return instance
+    exited = not sandbox.boot_alive(unit)
+    instance.stop()
+    tail = sandbox.boot_log(unit) or "(no output)"
+    if log:
+        for line in tail.splitlines():
+            log(line)
+    if exited:
+        raise OtreeError(f"oTree exited immediately. Output:\n{tail}")
+    raise OtreeError(
+        f"oTree did not start responding within {config.BOOT_TIMEOUT_SECONDS}s. "
+        f"Output:\n{tail}"
+    )
 
 
 class Pool:

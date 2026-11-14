@@ -12,7 +12,9 @@ Type=exec
 User=otreedeploy
 Group=otreedeploy
 # Reading the journal for the live log view comes from group membership, not privilege.
-SupplementaryGroups=systemd-journal otree
+# Deliberately not in any project's group: projects' files are reached through
+# ownership and the setgid project directories, never by this app joining their groups.
+SupplementaryGroups=systemd-journal
 WorkingDirectory=/opt/otreedeploy
 Environment=PATH=/opt/otreedeploy/.venv/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=/opt/otreedeploy/.venv/bin/otreedeploy --host 0.0.0.0 --port 8000

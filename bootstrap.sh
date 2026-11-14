@@ -28,7 +28,6 @@ APP_PORT="${OTREEDEPLOY_PORT:-8000}"
 # re-running this script -- and because the deploy pipeline calls uv on every upload.
 UV_VERSION=0.13.8
 
-OTREE_USER=otree
 APP_USER=otreedeploy
 
 log()  { printf '\n\033[1;34m==>\033[0m \033[1m%s\033[0m\n' "$*"; }
@@ -66,23 +65,29 @@ info "$(/usr/local/bin/uv --version)"
 
 # ----------------------------------------------------------------------------- users
 
-log "Creating service users"
-# `otree` runs experimenter-supplied Python. It gets no shell and no home to speak of.
-id -u "$OTREE_USER" >/dev/null 2>&1 || \
-    useradd --system --home-dir "$OTREE_HOME" --shell /usr/sbin/nologin "$OTREE_USER"
-# `otreedeploy` runs the web app that accepts uploads. Also unprivileged.
+log "Creating the service user"
+# `otreedeploy` runs the web app that accepts uploads. Unprivileged. Experiments do not
+# run as this user: each project gets its own user (otree_<slug>) when it is first
+# uploaded -- see deploy/otree-ctl, "provision".
 id -u "$APP_USER" >/dev/null 2>&1 || \
     useradd --system --home-dir "$APP_DIR" --shell /usr/sbin/nologin "$APP_USER"
 # Lets the app read the journal for the live log view without any privilege.
 usermod -aG systemd-journal "$APP_USER"
-usermod -aG "$OTREE_USER" "$APP_USER"
-info "$OTREE_USER (runs experiments), $APP_USER (runs the web app)"
+# Installs from before per-project users put the app in the shared `otree` group; it
+# needs no project's group any more.
+if id -nG "$APP_USER" | tr ' ' '\n' | grep -qx otree; then
+    gpasswd -d "$APP_USER" otree >/dev/null
+fi
+info "$APP_USER (runs the web app)"
 
 # ------------------------------------------------------------------------ directories
 
 log "Creating the directory layout"
-# The app owns these and writes to them; the otree user only needs to read the code.
-install -d -o "$APP_USER" -g "$OTREE_USER" -m 2755 "$OTREE_HOME"
+# The app owns these. Each project directory inside $OTREE_HOME belongs to that
+# project's group and is closed to every other project.
+install -d -o "$APP_USER" -g "$APP_USER" -m 0755 "$OTREE_HOME"
+# Older installs made this setgid to the shared group; numeric chmod keeps that bit.
+chgrp "$APP_USER" "$OTREE_HOME"; chmod 0755 "$OTREE_HOME"; chmod g-s "$OTREE_HOME"
 install -d -o "$APP_USER" -g "$APP_USER"   -m 0750 "$STATE_DIR"
 install -d -o "$APP_USER" -g "$APP_USER"   -m 0750 "$STATE_DIR/uploads"
 install -d -o "$APP_USER" -g "$APP_USER"   -m 0750 "$STATE_DIR/backups"
@@ -94,21 +99,17 @@ log "Configuring PostgreSQL"
 systemctl enable --now postgresql
 
 # Roles use peer authentication over the unix socket, so there are no passwords to
-# manage or leak. `otree` owns each experiment database; the app can create databases and
-# inherits access to them through role membership -- which is what lets it read session
-# lists and run pg_dump without sudo.
+# manage or leak. Each project's database is owned by that project's own role, created
+# by `otree-ctl provision`; the app is granted membership in each, which is what lets it
+# read session lists and run pg_dump. It cannot create databases or roles itself.
 run_sql() { su - postgres -c "psql -tAc \"$1\""; }
 
-if [[ -z "$(run_sql "SELECT 1 FROM pg_roles WHERE rolname='$OTREE_USER'")" ]]; then
-    run_sql "CREATE ROLE $OTREE_USER LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE"
-    info "created role $OTREE_USER"
-fi
 if [[ -z "$(run_sql "SELECT 1 FROM pg_roles WHERE rolname='$APP_USER'")" ]]; then
-    run_sql "CREATE ROLE $APP_USER LOGIN NOSUPERUSER CREATEDB NOCREATEROLE"
-    info "created role $APP_USER (may create databases)"
+    run_sql "CREATE ROLE $APP_USER LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE"
+    info "created role $APP_USER"
 fi
-run_sql "GRANT $OTREE_USER TO $APP_USER" >/dev/null
-info "granted $APP_USER membership in $OTREE_USER"
+# Older installs let the app create databases; provisioning does that now.
+run_sql "ALTER ROLE $APP_USER NOCREATEDB NOCREATEROLE" >/dev/null
 
 # ---------------------------------------------------------------- the management app
 
@@ -182,6 +183,40 @@ if [[ "$APP_PORT" != "8000" ]]; then
     sed -i "s/--port 8000/--port $APP_PORT/" /etc/systemd/system/otreedeploy.service
 fi
 systemctl daemon-reload
+
+# -------------------------------------------------------- per-project identities
+
+log "Giving each project its own user"
+# Projects deployed before per-project users ran as one shared `otree` user that owned
+# every database. Each moves to its own user and database role; its database is dumped
+# first. Provisioning is idempotent, so on later runs this only re-checks permissions.
+STAMP=$(date +%Y%m%d-%H%M%S)
+projects=0
+for dir in "$OTREE_HOME"/*/; do
+    slug=$(basename "$dir")
+    [[ $slug =~ ^[a-z][a-z0-9_]{0,38}$ && -d $dir/releases && ! -L ${dir%/} ]] || continue
+    projects=$((projects + 1))
+    migrating=no
+    if [[ ! -f /etc/systemd/system/otree@$slug.service.d/10-identity.conf ]]; then
+        migrating=yes
+        if [[ -n "$(run_sql "SELECT 1 FROM pg_database WHERE datname='otree_$slug'")" ]]; then
+            backup_dir="$STATE_DIR/backups/$slug"
+            install -d -o "$APP_USER" -g "$APP_USER" -m 0750 "$backup_dir"
+            dump="$backup_dir/$STAMP-before-migration.sql.gz"
+            runuser -u postgres -- pg_dump --no-owner --no-privileges "otree_$slug" | gzip > "$dump"
+            chown "$APP_USER:$APP_USER" "$dump"
+            info "$slug: database backed up to $dump"
+        fi
+    fi
+    user=$(/usr/local/sbin/otree-ctl provision "$slug")
+    info "$slug runs as $user"
+    if [[ $migrating == yes ]] && systemctl is-enabled --quiet "otree@$slug.service"; then
+        systemctl restart "otree@$slug.service"
+        info "$slug is live: restarted it as $user"
+    fi
+done
+[[ $projects -gt 0 ]] || info "no projects yet"
+
 # An install section changed between versions: re-enable the live experiment so its
 # links match the unit file installed above (e.g. the postgresql.service link).
 for unit in $(systemctl list-unit-files 'otree@*.service' --state=enabled --no-legend | awk '{print $1}'); do

@@ -28,7 +28,7 @@ def test_no_service_runs_as_root(server, manager, workdir):
     users = server.sh(
         "for u in otreedeploy otree@labdemo; do systemctl show -p User --value $u; done"
     ).out.split()
-    assert users == ["otreedeploy", "otree"]
+    assert users == ["otreedeploy", "otree_labdemo"]
     listeners = server.sh("ss -Hltnp '( sport = :80 or sport = :8000 )'").out
     pids = {int(p) for p in __import__("re").findall(r"pid=(\d+)", listeners)}
     owners = {server.sh(f"ps -o user= -p {pid}").out.strip() for pid in pids}

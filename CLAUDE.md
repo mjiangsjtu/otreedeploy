@@ -14,9 +14,11 @@ assumptions (`pct` and friends were removed on purpose). systemd is a hard requi
 not an implementation detail: experiments are units and the live log view reads the
 journal, so a Docker-style app container is out of scope.
 
-It is not a general PaaS and should not grow into one. Every design choice assumes a
-single trusted lab: one password for the whole management app, no user accounts, no
-multi-tenancy, no per-user permissions.
+It is not a general PaaS and should not grow into one. It serves one lab, but a lab
+with several groups whose data-protection promises differ (JBEF review, decision D2=C):
+**each project's code runs as its own user and owns its own database role**, so no
+project can reach another's data. The management password is still shared; per-person
+accounts with per-project access are being added on top of that boundary.
 
 ## Running it
 
@@ -49,15 +51,19 @@ OTREEDEPLOY_ROOT=/tmp/otreedeploy-dev .venv/bin/otreedeploy-passwd
 Dry run is not a set of stubs. Archives are really extracted, `uv` really builds
 virtualenvs, oTree really starts, sessions are really created through its REST API.
 
-Two things are substituted, and both have concealed real bugs in the past:
+Three things are substituted, and each has concealed real bugs in the past:
 
 - **PostgreSQL becomes SQLite.** SQLite has no roles, so nothing about database
   ownership, peer authentication or `GRANT` is exercised. The
   "permission denied for table otree_session" bug lived entirely in this gap.
+- **No per-project users.** `sandbox.py` runs build, resetdb and boots locally as the
+  current user. Who the code runs as is only checked by `tests/e2e`.
 - **systemd becomes an in-memory pair of sets.** Unless `OTREEDEPLOY_OTREE_PORT` is
   set, "make this live" changes a flag and no process is launched.
 
-When touching either area, say plainly in the response that the tests cannot confirm it.
+When touching any of these, say plainly that the unit tests cannot confirm it, and run
+the end-to-end suite (`tests/e2e/README.md`), which uses real systemd, PostgreSQL, sudo
+and `bootstrap.sh` in a container.
 
 The password is **not** in that gap. `auth.py` is ordinary Python with nothing
 substituted, and `tests/test_auth.py` drives it through the real HTTP stack, so a claim
@@ -90,15 +96,21 @@ These are load-bearing. Breaking one is how this app loses somebody's data.
 
 1. **Re-uploading never drops a database.** `resetdb` runs only when
    `has_otree_tables()` is false.
-2. **Everything in a project database is owned by the `otree` role.** The app runs
-   `resetdb` as its own role, so `postgres.align_ownership()` hands the tables over
-   afterwards. The experiment connects as `otree` and would otherwise be denied.
+2. **Uploaded code never runs as this app.** Building the venv (sdist hooks), `resetdb`,
+   the smoke test, export boots and the live unit all run as `otree_<slug>`
+   (`projects.project_user`) through `sandbox.py` -> `otree-ctl`, under the same
+   hardening. Consequently everything in a project database is owned by that project's
+   role, by construction. Never call a release's `.venv/bin/python` from the app --
+   `builder.otree_version` reads package metadata instead.
 3. **`DATABASE_URL` is always written explicitly.** Without it oTree silently falls back
    to a SQLite file inside the release directory, so a study appears to work while
    writing data the next deploy discards.
 4. **Nothing serves HTTP as root.** The app's entire root surface is
-   `/usr/local/sbin/otree-ctl`, which validates its own arguments; the sudoers rule
-   grants that one command with no wildcards.
+   `/usr/local/sbin/otree-ctl`, which validates every argument (slug, release name,
+   port range, canonical paths) before acting; the sudoers rule grants that one command
+   with no wildcards. A new verb needs tests in `tests/test_otree_ctl.py` for both what
+   it runs and what it refuses. Never use `REASSIGN OWNED` there: it also moves shared
+   objects such as other projects' databases.
 5. **`current` is repointed atomically**, via a temporary symlink and `rename`.
 6. **A project's port is never hardcoded.** Templates render `otree_port()`. A test
    fails if any template contains a literal "port 80".

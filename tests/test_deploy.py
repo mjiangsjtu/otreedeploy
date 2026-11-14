@@ -183,30 +183,46 @@ def test_job_log_replays_backlog_to_late_subscribers():
     assert list(job.subscribe()) == ["one", "two"]
 
 
+def test_the_otree_version_is_read_from_metadata_without_running_the_projects_code(
+    clean, tmp_path
+):
+    """The app must never execute a release's Python: that is the project's own code."""
+    release = tmp_path / "release"
+    dist = release / ".venv/lib/python3.12/site-packages/otree-6.0.15.dist-info"
+    dist.mkdir(parents=True)
+    (dist / "METADATA").write_text("Metadata-Version: 2.1\nName: otree\nVersion: 6.0.15\n\nbody\n")
+    # A python that would betray being run.
+    (release / ".venv/bin").mkdir(parents=True)
+    trap = release / ".venv/bin/python"
+    trap.write_text("#!/bin/sh\ntouch " + str(tmp_path / "executed") + "\n")
+    trap.chmod(0o755)
+
+    from otreedeploy import builder
+
+    assert builder.otree_version(release) == "6.0.15"
+    assert not (tmp_path / "executed").exists()
+
+
 @pytest.mark.slow
-def test_resetdb_hands_the_tables_to_the_otree_role(clean, monkeypatch):
-    """The experiment runs as `otree`, but this app runs resetdb -- so without a handover
-    every table is owned by the app's role and the experiment cannot read its own data.
+@pytest.mark.parametrize("rollback_works", [True, False])
+def test_a_failed_live_restart_says_whether_participants_are_affected(
+    clean, monkeypatch, rollback_works
+):
+    slug = deploy.deploy(deploy.new_job("v1"), REAL_OTREEZIP, "study.otreezip")
+    deploy.activate(slug)
+    first = config.get_settings().current_link(slug).resolve()
 
-    Dry run uses SQLite, which has no roles, so the wiring is what is asserted here: that
-    the deploy actually asks for the handover. The SQL itself only runs on PostgreSQL.
-    """
-    calls: list[str] = []
-    monkeypatch.setattr(
-        "otreedeploy.postgres.align_ownership", lambda slug: calls.append(slug) or 0
-    )
+    attempts: list[int] = []
 
-    job = deploy.new_job("ownership")
-    slug = deploy.deploy(job, REAL_OTREEZIP, "study.otreezip")
-    assert calls == [slug], "resetdb must be followed by the ownership handover"
+    def restart(_slug):
+        attempts.append(1)
+        if len(attempts) == 1 or not rollback_works:
+            raise deploy.DeployError("did not respond")
 
-    # A redeploy keeps the database, and must still repair one built by an older version.
-    calls.clear()
-    deploy.deploy(deploy.new_job("again"), REAL_OTREEZIP, "study.otreezip", slug=slug)
-    assert calls == [slug], "an existing database must still be repaired"
+    monkeypatch.setattr(deploy, "_restart_and_verify", restart)
+    job = deploy.new_job("v2")
+    with pytest.raises(deploy.DeployError):
+        deploy.deploy(job, REAL_OTREEZIP, "study.otreezip", slug=slug)
 
-
-def test_align_ownership_is_a_noop_in_dry_run(clean):
-    from otreedeploy import postgres
-
-    assert postgres.align_ownership("anything") == 0
+    assert config.get_settings().current_link(slug).resolve() == first
+    assert job.live_down is (not rollback_works)

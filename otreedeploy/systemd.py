@@ -79,9 +79,11 @@ def invalidate() -> None:
         _cache.clear()
 
 
-def _run(args: list[str], check: bool = True) -> subprocess.CompletedProcess:
+def _run(
+    args: list[str], check: bool = True, timeout: float = 120
+) -> subprocess.CompletedProcess:
     cmd = ["sudo", "-n", OTREE_CTL, *args]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if check and result.returncode != 0:
         raise SystemdError(
             f"`{' '.join(cmd)}` failed (exit {result.returncode}): "

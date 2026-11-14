@@ -78,10 +78,25 @@ class Release:
     log: str
 
 
+class _Connection(sqlite3.Connection):
+    """A connection that closes when its ``with`` block ends.
+
+    sqlite3's own context manager commits or rolls back but leaves the connection
+    open; every call here opens a fresh one, so they would otherwise pile up until
+    garbage collection.
+    """
+
+    def __exit__(self, *exc):
+        try:
+            return super().__exit__(*exc)
+        finally:
+            self.close()
+
+
 def connect() -> sqlite3.Connection:
     settings = config.get_settings()
     settings.state_dir.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(settings.db_path, timeout=30)
+    conn = sqlite3.connect(settings.db_path, timeout=30, factory=_Connection)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")

@@ -4,47 +4,293 @@
 # The management app runs unprivileged and calls this through a single fixed sudoers
 # entry. Validation lives here, in a root-owned script the app cannot modify, rather than
 # in a sudoers wildcard: argument wildcards in sudoers are notoriously easy to widen by
-# accident, whereas the regex below can only ever match a well-formed instance name.
+# accident, whereas the regexes below can only ever match well-formed names.
 #
-# Usage: otree-ctl <verb> [slug] [properties...]
+# Every project has its own system user and PostgreSQL role, both named by
+# project_user(). Uploaded code is arbitrary Python written by somebody else, so every
+# phase that executes it -- building the virtualenv (sdist build hooks), resetdb, the
+# smoke test, booting for a data export, and the live service -- runs as that user,
+# under the same systemd hardening. The management app never runs it itself.
+#
+# Usage:
+#   otree-ctl daemon-reload
+#   otree-ctl start|stop|restart|enable|disable|is-active|is-enabled <slug>
+#   otree-ctl show <slug> [Property...]
+#   otree-ctl provision|unprovision <slug>
+#   otree-ctl build|resetdb|clean <slug> <release>
+#   otree-ctl boot <slug> <release> <port>
+#   otree-ctl unboot <slug> <port>
+#   otree-ctl unboot-all
 
 set -euo pipefail
 
 SYSTEMCTL=/usr/bin/systemctl
+SYSTEMD_RUN=/usr/bin/systemd-run
+UV=/usr/local/bin/uv
+OTREE_HOME=/srv/otree
+APP_USER=otreedeploy
+DROPIN_ROOT=/etc/systemd/system
+
 SLUG_RE='^[a-z][a-z0-9_]{0,38}$'
+RELEASE_RE='^[0-9]{8}-[0-9]{6}(-[0-9]{1,3})?$'
+# Must match config.EPHEMERAL_PORT_RANGE (end exclusive).
+PORT_MIN=18000
+PORT_MAX=18899
 
 die() { echo "otree-ctl: $*" >&2; exit 64; }
+
+# The system user and PostgreSQL role for a project. Both must have the same name for
+# peer authentication. Linux caps user names at 32 characters, so long slugs are
+# shortened with a hash; projects.project_user() computes the same thing.
+project_user() {
+    local slug=$1
+    if (( ${#slug} <= 26 )); then
+        printf 'otree_%s\n' "$slug"
+    else
+        printf 'otree_%s_%s\n' "${slug:0:17}" "$(printf '%s' "$slug" | sha256sum | cut -c1-8)"
+    fi
+}
+
+need_args() { [[ $1 -eq $2 ]] || die "$verb takes exactly $2 argument(s)"; }
+check_slug() { [[ $1 =~ $SLUG_RE ]] || die "invalid project name: $1"; }
+check_release() { [[ $1 =~ $RELEASE_RE ]] || die "invalid release name: $1"; }
+check_port() {
+    [[ $1 =~ ^[0-9]{5}$ ]] && (( $1 >= PORT_MIN && $1 <= PORT_MAX )) \
+        || die "port out of range: $1"
+}
+
+# The release must be a real directory exactly where it should be: no symlinked project
+# directory or release pointing somewhere else.
+release_dir() {
+    local dir="$OTREE_HOME/$1/releases/$2"
+    [[ -d $dir ]] || die "no such release: $1/$2"
+    [[ $(realpath -e "$dir") == "$dir" ]] || die "release path is not canonical: $dir"
+    printf '%s\n' "$dir"
+}
+
+psql_admin() {  # psql_admin <database> <sql>
+    runuser -u postgres -- psql -X -q -v ON_ERROR_STOP=1 -d "$1" -tAc "$2"
+}
+
+# The confinement every phase that runs uploaded code gets. Kept identical to
+# otree@.service, so passing the smoke test means something about the live service.
+hardening() {  # hardening <slug> <user>
+    printf '%s\n' \
+        --uid="$2" --gid="$2" \
+        -p NoNewPrivileges=yes -p PrivateTmp=yes -p ProtectSystem=strict \
+        -p ProtectHome=yes -p ProtectKernelTunables=yes -p ProtectKernelModules=yes \
+        -p ProtectControlGroups=yes -p RestrictSUIDSGID=yes -p RestrictRealtime=yes \
+        -p LockPersonality=yes -p UMask=0022 \
+        -p "ReadWritePaths=$OTREE_HOME/$1" \
+        -E "HOME=$OTREE_HOME/$1/.cache" -E "UV_CACHE_DIR=$OTREE_HOME/$1/.cache/uv" \
+        -E UV_NO_PROGRESS=1
+}
+
+# Run a command to completion as the project user, streaming its output back. Returns
+# the command's exit status (systemd-run --wait passes it through).
+run_confined() {  # run_confined <slug> <release_dir> <with_env:yes|no> <cmd...>
+    local slug=$1 dir=$2 with_env=$3
+    shift 3
+    local user
+    user=$(project_user "$slug")
+    local -a props
+    mapfile -t props < <(hardening "$slug" "$user")
+    props+=(-p "WorkingDirectory=$dir" -E "PATH=$dir/.venv/bin:/usr/local/bin:/usr/bin:/bin")
+    if [[ $with_env == yes ]]; then
+        props+=(-p "EnvironmentFile=$OTREE_HOME/$slug/env")
+    fi
+    "$SYSTEMD_RUN" --quiet --wait --pipe --collect --service-type=exec \
+        "${props[@]}" -- "$@"
+}
 
 [[ $# -ge 1 ]] || die "no verb given"
 verb=$1
 shift
 
-if [[ $verb == "daemon-reload" ]]; then
-    [[ $# -eq 0 ]] || die "daemon-reload takes no arguments"
-    exec "$SYSTEMCTL" daemon-reload
-fi
-
 case $verb in
-    start|stop|restart|enable|disable|is-active|is-enabled|show) ;;
-    *) die "verb not permitted: $verb" ;;
-esac
+# ------------------------------------------------------------------ unit control
+daemon-reload)
+    need_args $# 0
+    exec "$SYSTEMCTL" daemon-reload
+    ;;
 
-[[ $# -ge 1 ]] || die "$verb needs a project name"
-slug=$1
-shift
+start|stop|restart|enable|disable|is-active|is-enabled)
+    need_args $# 1
+    check_slug "$1"
+    exec "$SYSTEMCTL" "$verb" "otree@$1.service"
+    ;;
 
-[[ $slug =~ $SLUG_RE ]] || die "invalid project name: $slug"
-
-unit="otree@${slug}.service"
-
-if [[ $verb == "show" ]]; then
+show)
+    [[ $# -ge 1 ]] || die "show needs a project name"
+    check_slug "$1"
+    unit="otree@$1.service"
+    shift
     args=()
     for prop in "$@"; do
         [[ $prop =~ ^[A-Za-z]+$ ]] || die "invalid property: $prop"
         args+=(-p "$prop")
     done
     exec "$SYSTEMCTL" show "$unit" "${args[@]}"
-fi
+    ;;
 
-[[ $# -eq 0 ]] || die "$verb takes no extra arguments"
-exec "$SYSTEMCTL" "$verb" "$unit"
+# ------------------------------------------------------------ project identity
+provision)
+    # Idempotent: creates whatever is missing and repairs ownership of what exists, so
+    # it is also how an install from before per-project users is migrated.
+    need_args $# 1
+    check_slug "$1"
+    slug=$1
+    user=$(project_user "$slug")
+    dir="$OTREE_HOME/$slug"
+    db="otree_$slug"
+
+    id -u "$user" >/dev/null 2>&1 || useradd --system --user-group --no-create-home \
+        --home-dir "$dir" --shell /usr/sbin/nologin "$user"
+
+    [[ ! -L $dir ]] || die "$dir is a symlink"
+    mkdir -p "$dir/releases"
+    # The app owns the project directory; the project user's group can read it, and no
+    # other project can. setgid makes everything the app creates inside inherit the
+    # group, which is how the project user gets read access without the app being a
+    # member of that group.
+    chown "$APP_USER:$user" "$dir" "$dir/releases"
+    chmod 2750 "$dir" "$dir/releases"
+    for release in "$dir"/releases/*/; do
+        [[ -d $release && ! -L ${release%/} ]] || continue
+        chgrp -R --no-dereference "$user" "$release"
+        # As deploy._open_to_project: the project user may write in its own release,
+        # and no directory it writes in is setgid (RestrictSUIDSGID refuses the chmods a
+        # build does in one). -P: never follow a symlink out of the release.
+        find -P "$release" -type d -exec chmod 0770 {} + -exec chmod g-s {} +
+        find -P "$release" -type f -exec chmod g+rw {} +
+    done
+    [[ -e $dir/env ]] && { chgrp "$user" "$dir/env"; chmod 0640 "$dir/env"; }
+    install -d -o "$user" -g "$user" -m 0700 "$dir/.cache"
+    chmod g-s "$dir/.cache"  # see above: no setgid where the project user writes
+
+    if [[ -z $(psql_admin postgres "SELECT 1 FROM pg_roles WHERE rolname = '$user'") ]]; then
+        psql_admin postgres "CREATE ROLE \"$user\" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE"
+    fi
+    # The management app may act as this role -- read session lists, run pg_dump -- but
+    # no project role is a member of any other, so projects cannot reach each other.
+    psql_admin postgres "GRANT \"$user\" TO $APP_USER" >/dev/null
+    if [[ -z $(psql_admin postgres "SELECT 1 FROM pg_database WHERE datname = '$db'") ]]; then
+        psql_admin postgres "CREATE DATABASE \"$db\" OWNER \"$user\""
+    else
+        psql_admin postgres "ALTER DATABASE \"$db\" OWNER TO \"$user\""
+    fi
+    psql_admin postgres "REVOKE CONNECT, TEMPORARY ON DATABASE \"$db\" FROM PUBLIC"
+    # Object by object, never REASSIGN OWNED: that also hands over shared objects, such
+    # as every other project's database owned by the same old role.
+    psql_admin "$db" "
+DO \$\$
+DECLARE r record;
+BEGIN
+  FOR r IN SELECT c.oid::regclass AS name, c.relkind FROM pg_class c
+           JOIN pg_namespace n ON n.oid = c.relnamespace
+           WHERE n.nspname = 'public' AND c.relkind IN ('r','p','v','m','f')
+             AND pg_get_userbyid(c.relowner) <> '$user' LOOP
+    EXECUTE format('ALTER %s %s OWNER TO %I',
+      CASE r.relkind WHEN 'v' THEN 'VIEW' WHEN 'm' THEN 'MATERIALIZED VIEW'
+                     WHEN 'f' THEN 'FOREIGN TABLE' ELSE 'TABLE' END, r.name, '$user');
+  END LOOP;
+  -- Sequences owned by a column moved with their table; these are the rest.
+  FOR r IN SELECT c.oid::regclass AS name FROM pg_class c
+           JOIN pg_namespace n ON n.oid = c.relnamespace
+           WHERE n.nspname = 'public' AND c.relkind = 'S'
+             AND pg_get_userbyid(c.relowner) <> '$user' LOOP
+    EXECUTE format('ALTER SEQUENCE %s OWNER TO %I', r.name, '$user');
+  END LOOP;
+END
+\$\$;"
+
+    install -d -m 0755 "$DROPIN_ROOT/otree@$slug.service.d"
+    printf '# Written by otree-ctl provision.\n[Service]\nUser=%s\nGroup=%s\n' "$user" "$user" \
+        > "$DROPIN_ROOT/otree@$slug.service.d/10-identity.conf"
+    "$SYSTEMCTL" daemon-reload
+    echo "$user"
+    ;;
+
+unprovision)
+    need_args $# 1
+    check_slug "$1"
+    slug=$1
+    user=$(project_user "$slug")
+    "$SYSTEMCTL" disable --now "otree@$slug.service" >/dev/null 2>&1 || true
+    "$SYSTEMCTL" stop "otree-boot-$slug-*.service" >/dev/null 2>&1 || true
+    psql_admin postgres "SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+                         WHERE datname = 'otree_$slug'" >/dev/null
+    psql_admin postgres "DROP DATABASE IF EXISTS \"otree_$slug\""
+    psql_admin postgres "DROP ROLE IF EXISTS \"$user\""
+    if id -u "$user" >/dev/null 2>&1; then
+        userdel "$user"
+    fi
+    rm -rf "$DROPIN_ROOT/otree@$slug.service.d"
+    [[ ! -L $OTREE_HOME/$slug ]] || die "$OTREE_HOME/$slug is a symlink"
+    rm -rf --one-file-system "${OTREE_HOME:?}/$slug"
+    "$SYSTEMCTL" daemon-reload
+    ;;
+
+# ------------------------------------------------------- running uploaded code
+build)
+    # Two confined runs rather than one shell line, so no argument is ever interpreted
+    # by a shell. `set -e` stops after a failed first step with its exit status.
+    need_args $# 2
+    check_slug "$1"; check_release "$2"
+    dir=$(release_dir "$1" "$2")
+    run_confined "$1" "$dir" no "$UV" venv .venv
+    run_confined "$1" "$dir" no "$UV" pip install --python "$dir/.venv/bin/python" \
+        -r requirements.txt
+    ;;
+
+resetdb)
+    need_args $# 2
+    check_slug "$1"; check_release "$2"
+    dir=$(release_dir "$1" "$2")
+    run_confined "$1" "$dir" yes "$dir/.venv/bin/otree" resetdb --noinput
+    ;;
+
+clean)
+    # Remove what the project user created inside a release (its .venv, oTree's stray
+    # db.sqlite3), as that user, so the app can delete the rest. Running this as root
+    # would mean following paths a project's own code could have rearranged.
+    need_args $# 2
+    check_slug "$1"; check_release "$2"
+    dir=$(release_dir "$1" "$2")
+    user=$(project_user "$1")
+    run_confined "$1" "$dir" no /usr/bin/find "$dir" -mindepth 1 -depth -user "$user" -delete
+    ;;
+
+boot)
+    # A private copy on a loopback port, for the smoke test and for data exports. The
+    # unit name includes the port, so systemd itself refuses a second boot on the same
+    # port, and stopping the unit stops every process in it.
+    need_args $# 3
+    check_slug "$1"; check_release "$2"; check_port "$3"
+    slug=$1
+    dir=$(release_dir "$1" "$2")
+    user=$(project_user "$slug")
+    mapfile -t props < <(hardening "$slug" "$user")
+    exec "$SYSTEMD_RUN" --quiet --collect --service-type=exec \
+        --unit="otree-boot-$slug-$3" "${props[@]}" \
+        -p "WorkingDirectory=$dir" -p "EnvironmentFile=$OTREE_HOME/$slug/env" \
+        -p TimeoutStopSec=15 -E "PORT=$3" \
+        -E "PATH=$dir/.venv/bin:/usr/local/bin:/usr/bin:/bin" \
+        -- "$dir/.venv/bin/otree" prodserver "127.0.0.1:$3"
+    ;;
+
+unboot)
+    need_args $# 2
+    check_slug "$1"; check_port "$2"
+    exec "$SYSTEMCTL" stop "otree-boot-$1-$2.service"
+    ;;
+
+unboot-all)
+    need_args $# 0
+    exec "$SYSTEMCTL" stop 'otree-boot-*.service'
+    ;;
+
+*)
+    die "verb not permitted: $verb"
+    ;;
+esac

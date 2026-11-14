@@ -42,8 +42,6 @@ PARTICIPANT_ACTIVE_SECONDS = 120
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024
 KEEP_RELEASES = 5
 
-OTREE_SYSTEM_USER = "otree"
-
 
 @dataclass(frozen=True)
 class Settings:

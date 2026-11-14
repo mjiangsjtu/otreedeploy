@@ -50,5 +50,5 @@ def test_the_documented_restore_brings_back_the_data_after_a_reset(server, manag
     restored = _sessions(server)
     if result.ok:
         assert set(original) <= restored, "restore reported success but the data is not back"
-    assert server.non_otree_owned("labdemo") == []
+    assert server.foreign_owned("labdemo") == []
     assert experiment.create_session().status_code == 200

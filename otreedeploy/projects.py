@@ -8,6 +8,7 @@ narrow and validated at every boundary.
 
 from __future__ import annotations
 
+import hashlib
 import re
 
 # Lowercase, starts with a letter (unquoted PostgreSQL identifiers may not start with a
@@ -66,6 +67,21 @@ def unique_slug(desired: str, taken: set[str]) -> str:
 
 def db_name(slug: str) -> str:
     return f"otree_{validate(slug)}"
+
+
+def project_user(slug: str) -> str:
+    """The system user and PostgreSQL role a project's code runs as.
+
+    One per project, so no project's code can reach another's data. Both names must be
+    equal for peer authentication, and Linux caps user names at 32 characters, so long
+    slugs are shortened with a hash. deploy/otree-ctl computes the same thing; a test
+    keeps the two in step.
+    """
+    validate(slug)
+    if len(slug) <= 26:
+        return f"otree_{slug}"
+    digest = hashlib.sha256(slug.encode()).hexdigest()[:8]
+    return f"otree_{slug[:17]}_{digest}"
 
 
 def unit_name(slug: str) -> str:

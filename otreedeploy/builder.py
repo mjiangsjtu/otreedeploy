@@ -10,7 +10,7 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable
 
 Logger = Callable[[str], None]
 
@@ -115,21 +115,19 @@ def build_venv(release_dir: Path, log: Logger, uv: str = "uv") -> None:
 
 
 def otree_version(release_dir: Path) -> str | None:
-    """Read the oTree version actually installed in the release's venv."""
-    python = venv_python(release_dir)
-    if not python.exists():
-        return None
-    try:
-        out = subprocess.run(
-            [str(python), "-c", "import otree; print(otree.__version__)"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except (subprocess.SubprocessError, OSError):
-        return None
-    return out.stdout.strip() or None
+    """Read the oTree version installed in the release's venv, from package metadata.
 
-
-def iter_release_notes(*groups: Iterable[str]) -> list[str]:
-    return [note for group in groups for note in group]
+    Read, not imported: importing would execute the project's own environment, and
+    this runs as the management app -- whose privileges uploaded code must never get.
+    """
+    for metadata in sorted(release_dir.glob(".venv/lib/python*/site-packages/otree-*.dist-info/METADATA")):
+        try:
+            with open(metadata, encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    if line.startswith("Version:"):
+                        return line.split(":", 1)[1].strip() or None
+                    if not line.strip():
+                        break
+        except OSError:
+            continue
+    return None

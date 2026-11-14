@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import queue
 import shutil
-import subprocess
 import threading
 import time
 import uuid
@@ -27,6 +26,7 @@ from . import (
     otreeapi,
     postgres,
     projects,
+    sandbox,
     systemd,
 )
 from .db import Project
@@ -61,7 +61,10 @@ class Job:
     slug: str | None = None
     title: str = "Deploying"
     lines: list[str] = field(default_factory=list)
-    status: str = "running"  # running | success | failed
+    status: str = "running"  # running | success | failed | blocked | live_down
+    # Set when the failure took the live experiment down with it, so the page does not
+    # tell the experimenter that "nothing was changed for participants".
+    live_down: bool = False
     error: str | None = None
     started_at: float = field(default_factory=time.time)
     _subscribers: list[queue.Queue] = field(default_factory=list)
@@ -216,6 +219,16 @@ def deploy(
     )
 
     digest = archive.sha256(archive_path)
+
+    # The project's own system user, database role and database. Everything its code
+    # does from here on -- build hooks, resetdb, the smoke test -- runs as that user.
+    try:
+        sandbox.provision(slug)
+    except sandbox.SandboxError as exc:
+        raise DeployError(f"could not prepare the project's user and database: {exc}") from exc
+    if not config.dry_run():
+        log(f"Project runs as its own user: {projects.project_user(slug)}")
+
     release = _new_release_name()
     release_dir = settings.release_dir(slug, release)
 
@@ -231,6 +244,7 @@ def deploy(
         log(f"Extracting to {release_dir}…")
         release_dir.parent.mkdir(parents=True, exist_ok=True)
         archive.extract(archive_path, release_dir)
+        _open_to_project(release_dir)
 
         # 3. Normalize -------------------------------------------------------------
         normalization = builder.normalize_release(release_dir)
@@ -239,13 +253,11 @@ def deploy(
 
         # 4. Build the virtualenv --------------------------------------------------
         log("Building the virtualenv with uv…")
-        builder.build_venv(release_dir, log)
+        sandbox.build(slug, release_dir, log)
         version = builder.otree_version(release_dir)
         log(f"  oTree {version or 'version unknown'}")
 
         # 5. Database and environment ----------------------------------------------
-        if postgres.create_database(slug):
-            log(f"Created database {projects.db_name(slug)}")
         postgres.prepare_release(slug, release_dir)
         environment.write(project)
         log("Wrote the service environment file")
@@ -255,9 +267,6 @@ def deploy(
             _run_resetdb(project, release_dir, log)
         else:
             log("Existing database kept — your collected data is untouched")
-            repaired = postgres.align_ownership(slug)
-            if repaired:
-                log(f"  repaired ownership of {repaired} object(s) left by an older deploy")
 
         # 6. Smoke test ------------------------------------------------------------
         log("Starting a test copy on a private port to check it works…")
@@ -276,11 +285,13 @@ def deploy(
                 log(f"  live on port {config.otree_port()}")
             except DeployError as exc:
                 log(f"  FAILED: {exc}")
+                job.live_down = True
                 if previous:
                     log(f"Rolling back to {previous.name}…")
                     _point_current_at(slug, previous)
                     try:
                         _restart_and_verify(slug)
+                        job.live_down = False
                         log("  rolled back; the previous version is serving again")
                     except DeployError as inner:
                         log(f"  rollback also failed: {inner}")
@@ -298,8 +309,31 @@ def deploy(
         # Leave a failed build on disk only if it is not the published one; otherwise it
         # is dead weight that will confuse the next person to look.
         if current_release_dir(slug) != release_dir:
+            sandbox.clean(slug, release_dir)
             shutil.rmtree(release_dir, ignore_errors=True)
         raise
+
+
+def _open_to_project(release_dir: Path) -> None:
+    """Let the project's own user write inside its release.
+
+    The build runs as that user and writes here: its .venv, and any local package listed
+    in requirements.txt is built in place. The group is already the project's, inherited
+    from the setgid project directory; this adds group write. Directories also lose the
+    setgid bit: anything the project user created in them would inherit it, and its
+    hardening (RestrictSUIDSGID) then refuses the chmods a build performs. No other
+    project can reach any of this -- the project directory is closed to them.
+    """
+    if config.dry_run():
+        return
+    release_dir.chmod(0o770)
+    for path in release_dir.rglob("*"):
+        if path.is_symlink():
+            continue
+        if path.is_dir():
+            path.chmod(0o770)
+        else:
+            path.chmod((path.stat().st_mode & 0o777) | 0o060)
 
 
 def _display_name(filename: str) -> str:
@@ -311,28 +345,17 @@ def _display_name(filename: str) -> str:
 
 
 def _run_resetdb(project: Project, release_dir: Path, log: Callable[[str], None]) -> None:
-    otree = builder.venv_otree(release_dir)
-    process = subprocess.Popen(
-        [str(otree), "resetdb", "--noinput"],
-        cwd=release_dir,
-        env=environment.subprocess_env(project, config.otree_port(), release_dir),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-    )
-    assert process.stdout is not None
-    for line in process.stdout:
-        log(f"  {line.rstrip()}")
-    if process.wait() != 0:
-        raise DeployError(
-            "otree resetdb failed; the database schema could not be created"
+    """Create oTree's tables, as the project's own user -- so they are also owned by
+    the project's role, which the experiment connects as."""
+    try:
+        sandbox.resetdb(
+            project.slug,
+            release_dir,
+            environment.subprocess_env(project, config.otree_port(), release_dir),
+            log,
         )
-    # resetdb ran as this app's role, so the tables are owned by it rather than by the
-    # user the experiment runs as. Hand them over before anything tries to serve.
-    moved = postgres.align_ownership(project.slug)
-    if moved:
-        log(f"  handed {moved} object(s) to the '{postgres.OTREE_ROLE}' role")
+    except sandbox.SandboxError as exc:
+        raise DeployError(str(exc)) from exc
 
 
 def _smoke_test(project: Project, release_dir: Path, log: Callable[[str], None]) -> None:
@@ -383,6 +406,7 @@ def _prune_releases(slug: str, log: Callable[[str], None]) -> None:
     for stale in all_releases[: -config.KEEP_RELEASES]:
         if stale == keep_current:
             continue
+        sandbox.clean(slug, stale)
         shutil.rmtree(stale, ignore_errors=True)
         db.delete_release(slug, stale.name)
         log(f"Removed old release {stale.name}")
@@ -454,23 +478,27 @@ def reset_database(slug: str, force: bool = False) -> Path | None:
         raise DeployError(f"unknown project '{slug}'")
     guard_disruption(slug, force)
 
+    # Check everything that can fail cheaply before touching the live service, so a
+    # refused reset leaves the experiment exactly as it was.
+    release_dir = current_release_dir(slug)
+    if release_dir is None:
+        raise DeployError(f"'{slug}' has no deployed release")
+
     snapshot = backup(slug, "before-reset")
 
     # resetdb blocks on any other open connection, so clear them out first.
     was_running = systemd.is_active(slug)
     otreeapi.pool.release(slug)
-    if was_running:
-        systemd.stop(slug)
-
-    release_dir = current_release_dir(slug)
-    if release_dir is None:
-        raise DeployError(f"'{slug}' has no deployed release")
-
-    postgres.create_database(slug)
     job = new_job(f"Resetting {slug}", slug)
     try:
+        if was_running:
+            systemd.stop(slug)
+        sandbox.provision(slug)
         _run_resetdb(project, release_dir, job.log)
         job.finish("success")
+    except sandbox.SandboxError as exc:
+        job.finish("failed", str(exc))
+        raise DeployError(str(exc)) from exc
     except Exception as exc:
         job.finish("failed", str(exc))
         raise
@@ -494,9 +522,8 @@ def delete_project(slug: str, force: bool = False) -> Path | None:
     if systemd.is_enabled(slug):
         systemd.disable(slug)
 
-    postgres.drop_database(slug)
-    settings = config.get_settings()
-    shutil.rmtree(settings.project_dir(slug), ignore_errors=True)
+    # Database, role, system user, unit identity and files. Backups stay.
+    sandbox.unprovision(slug)
     db.delete_project(slug)
     db.log_event("delete", f"project deleted (backup: {snapshot})", slug)
     return snapshot

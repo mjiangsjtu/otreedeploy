@@ -172,6 +172,50 @@ def with_identity_probe(directory: Path) -> Path:
     return _write(members, directory / "labdemo.otreezip")
 
 
+# Tries to reach a neighbouring project from inside this one: its database, its
+# environment file (admin password, REST key), its code, and this app's own state.
+_NEIGHBOUR_PROBE = '''
+PROBE_FILE = "%s"
+
+def _otreedeploy_e2e_neighbour_probe(phase):
+    import json, os, pwd, sys
+    record = {"phase": phase, "argv": " ".join(sys.argv[:3]),
+              "user": pwd.getpwuid(os.geteuid()).pw_name}
+    try:
+        import psycopg2
+        conn = psycopg2.connect(dbname="otree_labdemo", host="/var/run/postgresql")
+        conn.cursor().execute("SELECT count(*) FROM otree_session")
+        record["database"] = "READ"
+    except Exception as exc:
+        record["database"] = type(exc).__name__ + ": " + str(exc).strip()[:120]
+    for key, path in [("env", "/srv/otree/labdemo/env"),
+                      ("code", "/srv/otree/labdemo/current/settings.py"),
+                      ("state_db", "/var/lib/otreedeploy/state.db")]:
+        try:
+            with open(path, "rb") as handle:
+                handle.read(1)
+            record[key] = "READ"
+        except Exception as exc:
+            record[key] = type(exc).__name__
+    try:
+        fd = os.open(PROBE_FILE, os.O_WRONLY | os.O_APPEND)
+        os.write(fd, (json.dumps(record) + "\\n").encode())
+        os.close(fd)
+    except Exception:
+        pass
+''' % PROBE_FILE
+
+
+def with_neighbour_probe(directory: Path) -> Path:
+    """A second project, 'neighbour', whose code tries to read labdemo's data."""
+    members = _read()
+    members["simple_task/__init__.py"] = (
+        _NEIGHBOUR_PROBE.encode() + b'\n_otreedeploy_e2e_neighbour_probe("import")\n\n'
+        + members["simple_task/__init__.py"]
+    )
+    return _write(members, directory / "neighbour.otreezip")
+
+
 def renamed(source: Path, directory: Path, name: str) -> Path:
     """Upload the same content under another name, i.e. as another project."""
     target = directory / name

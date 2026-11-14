@@ -70,6 +70,7 @@ ZH: dict[str, str] = {
     "Finished successfully.": "已成功完成。",
     "Stopped to protect a session in progress.": "为保护正在进行的会话已中止。",
     "This deploy failed. Nothing was changed for participants.": "本次部署失败，参与者一侧没有任何改动。",
+    "This deploy failed, and the live experiment could not be brought back. Participants cannot reach it right now: see the log above, then roll back or restart it from the project page.": "本次部署失败，且线上实验未能恢复。参与者目前无法访问：请查看上方日志，然后在项目页面回滚或重启。",
     # -- project -----------------------------------------------------------------
     "{n} participant is active right now.": "当前有 {n} 名参与者正在进行实验。",
     "{n} participants are active right now.": "当前有 {n} 名参与者正在进行实验。",

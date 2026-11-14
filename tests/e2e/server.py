@@ -161,16 +161,25 @@ class Server:
     def unit_enabled(self, slug: str) -> bool:
         return self.sh(f"systemctl is-enabled otree@{slug}", check=False).out.strip() == "enabled"
 
-    def non_otree_owned(self, slug: str) -> list[str]:
-        """Objects in a project database that the experiment's role does not own."""
+    def foreign_owned(self, slug: str) -> list[str]:
+        """Objects in a project database not owned by the project's own role."""
+        owner = f"otree_{slug}"
         out = self.psql(
             f"otree_{slug}",
             "SELECT c.relname || ':' || pg_get_userbyid(c.relowner) FROM pg_class c "
             "JOIN pg_namespace n ON n.oid = c.relnamespace "
             "WHERE n.nspname = 'public' AND c.relkind IN ('r','S','v','m') "
-            "AND pg_get_userbyid(c.relowner) <> 'otree' ORDER BY 1",
+            f"AND pg_get_userbyid(c.relowner) <> '{owner}' ORDER BY 1",
         )
         return [line for line in out.splitlines() if line]
+
+    def copy_archive_in(self, tar_bytes: bytes, destination: str) -> None:
+        """Unpack a tar stream (e.g. `git archive`) into the container."""
+        self.sh(f"rm -rf {destination} && mkdir -p {destination}")
+        subprocess.run(
+            [RUNTIME, "exec", "-i", self.name, "tar", "-C", destination, "-xf", "-"],
+            input=tar_bytes, check=True, timeout=300,
+        )
 
     # ---------------------------------------------------------------------- HTTP
 

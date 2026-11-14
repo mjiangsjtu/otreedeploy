@@ -22,6 +22,9 @@ PartOf=postgresql.service
 
 [Service]
 Type=exec
+# Each project runs as its own user (otree_<slug>), set by the drop-in that
+# `otree-ctl provision` writes to otree@<slug>.service.d/10-identity.conf. The shared
+# `otree` user below is only a fallback for an install that has not been migrated.
 User=otree
 Group=otree
 WorkingDirectory=/srv/otree/%i/current

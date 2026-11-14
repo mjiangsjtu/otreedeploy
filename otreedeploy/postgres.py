@@ -28,12 +28,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import psycopg
-from psycopg import sql
 
 from . import config
 from .projects import db_name
 
-OTREE_ROLE = "otree"
 MAINTENANCE_DB = "postgres"
 
 SESSION_TABLE = "otree_session"
@@ -139,67 +137,24 @@ def database_exists(slug: str) -> bool:
 
 
 def create_database(slug: str) -> bool:
-    """Create the project's database if absent. Returns True if it was created now."""
-    if config.dry_run():
-        # oTree's resetdb creates the SQLite file itself; just make sure the directory
-        # it lives in is there.
-        _sqlite_path(slug).parent.mkdir(parents=True, exist_ok=True)
-        return not _sqlite_path(slug).exists()
-    if database_exists(slug):
-        return False
-    name = db_name(slug)
-    with _connect(MAINTENANCE_DB) as conn:
-        conn.execute(
-            sql.SQL("CREATE DATABASE {} OWNER {}").format(
-                sql.Identifier(name), sql.Identifier(OTREE_ROLE)
-            )
-        )
-    return True
+    """Dry run only: make room for the project's SQLite file.
 
-
-def align_ownership(slug: str) -> int:
-    """Give every object in the project database to the ``otree`` role.
-
-    ``otree resetdb`` is run by this app, so the tables it creates are owned by the app's
-    role -- while the experiment that serves participants connects as ``otree``, which
-    then has no privileges on them and fails with "permission denied for table
-    otree_session" on the first request. Role membership runs the wrong way to save us:
-    the app inherits otree's rights, not the reverse.
-
-    Idempotent, and repairs a database that was built before this ran.
+    A real install creates each database through ``otree-ctl provision``, owned by the
+    project's own role -- this app's role cannot create databases at all.
     """
-    if config.dry_run():
-        return 0
-    with _connect(db_name(slug)) as conn:
-        owner = conn.execute("SELECT current_user").fetchone()[0]
-        if owner == OTREE_ROLE:
-            return 0
-        moved = conn.execute(
-            "SELECT count(*) FROM pg_class c JOIN pg_roles r ON r.oid = c.relowner "
-            "WHERE r.rolname = %s AND c.relkind IN ('r', 'p', 'S', 'v', 'm')",
-            (owner,),
-        ).fetchone()[0]
-        conn.execute(
-            sql.SQL("REASSIGN OWNED BY {} TO {}").format(
-                sql.Identifier(owner), sql.Identifier(OTREE_ROLE)
-            )
-        )
-    return moved
+    if not config.dry_run():
+        raise PostgresError("databases are created by otree-ctl provision")
+    # oTree's resetdb creates the SQLite file itself; just make sure the directory it
+    # lives in is there.
+    _sqlite_path(slug).parent.mkdir(parents=True, exist_ok=True)
+    return not _sqlite_path(slug).exists()
 
 
 def drop_database(slug: str) -> None:
-    if config.dry_run():
-        _sqlite_path(slug).unlink(missing_ok=True)
-        return
-    name = db_name(slug)
-    with _connect(MAINTENANCE_DB) as conn:
-        # Evict stragglers first, or DROP DATABASE fails on any lingering connection.
-        conn.execute(
-            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-            "WHERE datname = %s AND pid <> pg_backend_pid()",
-            (name,),
-        )
-        conn.execute(sql.SQL("DROP DATABASE IF EXISTS {}").format(sql.Identifier(name)))
+    """Dry run only; a real install drops it with ``otree-ctl unprovision``."""
+    if not config.dry_run():
+        raise PostgresError("databases are dropped by otree-ctl unprovision")
+    _sqlite_path(slug).unlink(missing_ok=True)
 
 
 # ------------------------------------------------------------------------ inspection

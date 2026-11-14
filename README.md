@@ -311,8 +311,9 @@ Edit and restart `otreedeploy.service` if you do:
     current -> releases/…         flipped atomically on deploy
 ```
 
-Each project gets its own PostgreSQL database (`otree_<slug>`) and its own virtualenv, so
-studies pinned to different oTree versions coexist and resetting one cannot touch another.
+Each project gets its own PostgreSQL database (`otree_<slug>`), owned by its own role,
+and its own virtualenv, so studies pinned to different oTree versions coexist, and no
+project's code can read or reset another's data.
 
 systemd supervises the experiments through a template unit, `otree@<slug>.service`.
 Exactly one instance is *enabled* at a time — that is what makes a project the live one,
@@ -320,23 +321,41 @@ and what restores it after a reboot.
 
 ### Privileges
 
-Nothing serves HTTP as root.
+Nothing serves HTTP as root, and the management app never runs uploaded code.
 
-- **`otree`** runs the experiments. An uploaded project is arbitrary Python — installing
-  it executes build hooks from PyPI, and running it executes experimenter code
-  continuously — so it is confined to its own unprivileged user with a hardened unit.
-  Port 80 comes from `CAP_NET_BIND_SERVICE`, not from root.
+- **`otree_<slug>`**: one system user and one PostgreSQL role per project, created
+  when the project is first uploaded. An uploaded project is arbitrary Python. Installing
+  it runs build hooks from PyPI, `resetdb` imports its models, and every boot runs
+  experimenter code. So *every* phase runs as the project's own user under the same
+  hardened systemd settings: the build, `resetdb`, the smoke test, the private boot for
+  a data export, and the live service.
+  - That user owns the project's database and its release directories, and nothing else.
+  - It cannot read another project's code, environment file (admin password, REST key)
+    or database. Other roles are refused `CONNECT` to its database.
+  - It cannot read this app's files: the password hash, `state.db`, uploads, backups.
+  - Port 80 comes from `CAP_NET_BIND_SERVICE`, not from root.
+  - Names longer than Linux allows are shortened as `otree_<first 17>_<hash>`.
 - **`otreedeploy`** runs this app. It accepts file uploads over the network, so it is
-  unprivileged too. Its entire root surface is one wrapper, `/usr/local/sbin/otree-ctl`,
-  which validates its own arguments; the sudoers rule grants that single command and
-  contains no wildcards. Database work needs no sudo at all — it uses peer authentication
-  over the unix socket, with role membership for read access. The management password is
-  hashed with PBKDF2 into a 0600 file owned by this user — deliberately not in
-  `state.db`, so a copy of the metadata carries no credential.
+  unprivileged too.
+  - Its entire root surface is one wrapper, `/usr/local/sbin/otree-ctl`, which validates
+    every argument (project name, release name, port range) before acting. The sudoers
+    rule grants that single command and contains no wildcards.
+  - The app reaches each project's database through membership in that project's role,
+    using peer authentication over the unix socket, so there are no passwords. It cannot
+    create databases or roles itself.
+  - The management password is hashed with PBKDF2 into a 0600 file owned by this user.
+    It is deliberately kept out of `state.db`, so a copy of the metadata carries no
+    credential.
 
-Projects are **not** isolated from each other: they all run as `otree` and share a
-database role. That is the right trade for one lab with trusted users, and worth knowing
-before you hand out access more widely.
+What this does **not** cover: everyone who knows the management password can still see
+and manage every project. Separate accounts with per-project access are a separate
+layer, described under the management password.
+
+**Upgrading from a version before per-project users:** re-running `bootstrap.sh` moves
+each project to its own user and role. It first dumps every database to
+`backups/<slug>/<time>-before-migration.sql.gz`, then restarts the live experiment
+under its new user. Do it between sessions. The old shared `otree` user is left in
+place but owns nothing.
 
 ## Running it on your laptop
 

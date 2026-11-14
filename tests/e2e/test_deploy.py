@@ -14,7 +14,7 @@ def test_a_first_upload_goes_live_and_takes_participants(server, manager, workdi
         for participant in experiment.participant_codes(code):
             page = experiment.open_as_participant(participant)
             assert page.status_code == 200, page.text[:2000]
-    assert server.non_otree_owned("labdemo") == []
+    assert server.foreign_owned("labdemo") == []
     # Invariant 3: the experiment writes to PostgreSQL, never to a stray SQLite file.
     assert server.psql("otree_labdemo", "SELECT count(*) FROM otree_session") == "2"
 
@@ -53,7 +53,6 @@ def test_adding_a_model_field_never_publishes_a_release_that_errors_for_particip
     assert data.status_code == 200, data.text[:1000]
 
 
-@pytest.mark.xfail(strict=True, reason="M3: tables of a new app end up owned by otreedeploy")
 def test_adding_an_app_to_a_live_project_still_lets_sessions_be_created(
     server, manager, workdir
 ):
@@ -61,7 +60,7 @@ def test_adding_an_app_to_a_live_project_still_lets_sessions_be_created(
 
     manager.upload(projects.with_new_app(workdir / "v2"), slug="labdemo").assert_success()
 
-    assert server.non_otree_owned("labdemo") == []
+    assert server.foreign_owned("labdemo") == []
     experiment = server.experiment("labdemo")
     response = experiment.create_session()
     assert response.status_code == 200, response.text[:2000]
