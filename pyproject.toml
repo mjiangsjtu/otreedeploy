@@ -1,6 +1,6 @@
 [project]
 name = "otreedeploy"
-version = "0.1.0"
+version = "0.2.0"
 description = "Upload-and-run deployment for oTree experiments on a single lab server"
 readme = "README.md"
 requires-python = ">=3.11"

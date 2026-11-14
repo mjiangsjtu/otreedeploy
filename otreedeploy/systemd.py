@@ -186,18 +186,27 @@ def is_active(slug: str) -> bool:
         if instance is not None and not instance.alive:
             _fake_stop(slug)
         return slug in _fake.active
-    # `is-active` exits non-zero for inactive units, which is not an error here.
-    return _run(["is-active", slug], check=False).stdout.strip() == "active"
+    # Reading a unit's state needs no privilege, so no sudo; and it is cached briefly,
+    # because one page render asks about every project several times (N10). Every
+    # call that changes a unit clears the cache. `is-active` exits non-zero for an
+    # inactive unit, which is not an error here.
+    return _cached(f"active:{slug}", lambda: _query("is-active", slug) == "active")
+
+
+def _query(verb: str, slug: str) -> str:
+    try:
+        return subprocess.run(
+            ["systemctl", verb, unit_name(slug)], capture_output=True, text=True, timeout=30
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
 
 
 def is_enabled(slug: str) -> bool:
     validate(slug)
     if config.dry_run():
         return slug in _fake.enabled
-    return _cached(
-        f"enabled:{slug}",
-        lambda: _run(["is-enabled", slug], check=False).stdout.strip() == "enabled",
-    )
+    return _cached(f"enabled:{slug}", lambda: _query("is-enabled", slug) == "enabled")
 
 
 def show(slug: str, *properties: str) -> dict[str, str]:
