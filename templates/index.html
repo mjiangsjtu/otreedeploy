@@ -61,7 +61,7 @@
         <td style="width:1%;white-space:nowrap">
           {% if e.slug %}<a class="mono" href="/p/{{ e.slug }}">{{ e.slug }}</a>{% endif %}
         </td>
-        <td>{{ t(e.message) }}</td>
+        <td>{{ msg(e.message) }}</td>
       </tr>
     {% endfor %}
     </tbody>

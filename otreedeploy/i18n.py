@@ -235,6 +235,24 @@ def translate(lang: str, text: str, **params) -> str:
     return out
 
 
+def is_known(text: str) -> bool:
+    """Whether ``text`` is one of the catalogue's own source strings."""
+    return any(text in table for table in CATALOG.values())
+
+
+def message(lang: str, text: str, **params) -> str:
+    """Translate text that did not come from a template literal.
+
+    Only a string the catalogue knows is ever passed to ``str.format``. Anything else
+    -- an exception message, a value from a URL -- is returned exactly as it is: a
+    format spec such as ``{port:>999999999}`` in untrusted text would otherwise make
+    the server build a page of whatever size it asks for.
+    """
+    if not text or not is_known(text):
+        return text
+    return translate(lang, text, **params)
+
+
 def ago(lang: str, value) -> str:
     """Relative time, translated. Falls back to an absolute date beyond a week."""
     if not value:

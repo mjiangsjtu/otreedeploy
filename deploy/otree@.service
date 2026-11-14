@@ -10,7 +10,15 @@ Description=oTree experiment: %i
 Documentation=https://otree.readthedocs.io/
 After=network-online.target postgresql.service
 Wants=network-online.target
+# The experiment must follow PostgreSQL in both directions. oTree holds one database
+# connection for its whole life (SQLAlchemy StaticPool) and never reconnects, so a
+# process that outlives a database restart answers every request with HTTP 500.
+#  - Requires= + PartOf=: stopping or restarting PostgreSQL stops or restarts this too.
+#  - WantedBy=postgresql.service below: starting PostgreSQL starts the live experiment
+#    again. A package upgrade stops and then starts PostgreSQL as two separate steps,
+#    and without this the experiment stayed down after the start.
 Requires=postgresql.service
+PartOf=postgresql.service
 
 [Service]
 Type=exec
@@ -52,4 +60,5 @@ StandardError=journal
 SyslogIdentifier=otree-%i
 
 [Install]
-WantedBy=multi-user.target
+# Only the live project is enabled, so only it is pulled in by either target.
+WantedBy=multi-user.target postgresql.service

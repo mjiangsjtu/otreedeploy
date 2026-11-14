@@ -8,7 +8,6 @@ from . import projects
 from .server import deploy_live
 
 
-@pytest.mark.xfail(strict=True, reason="R1 3.1 / N6: ?error= is passed through str.format")
 def test_the_login_page_does_not_let_a_url_choose_the_response_size(server):
     r = httpx.get(f"http://{server.ip}:8000/login",
                   params={"error": "{port:>20000000}"}, timeout=60)
@@ -26,7 +25,6 @@ def test_a_form_posted_from_the_experiment_origin_is_refused(server, manager, wo
     assert r.status_code == 403
 
 
-@pytest.mark.xfail(strict=True, reason="m8: rollback joins an unvalidated release into a path")
 def test_rollback_only_accepts_this_projects_own_releases(server, manager, workdir):
     deploy_live(server, manager, projects.labdemo(workdir))
     manager.upload(projects.renamed(projects.labdemo(workdir / "o"), workdir / "o2",

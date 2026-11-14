@@ -163,7 +163,28 @@ def test_the_project_and_data_pages_render_in_both_languages(client):
 
 def test_a_notice_carried_through_a_redirect_is_translated_on_arrival(client):
     """Notices travel in the URL as English keys and are looked up when rendered."""
+    from otreedeploy import app as app_module
+
     client.cookies.set(i18n.COOKIE, "zh")
-    page = client.get("/?notice=now+serving+on+port+%7Bport%7D").text
+    page = client.get(app_module._with_message("/", "now serving on port {port}")).text
     assert "已在端口 80 上提供服务" in page
     assert "now serving on port" not in page
+
+
+def test_a_message_in_the_url_that_this_app_did_not_sign_is_not_shown(client):
+    page = client.get("/?error=Your+password+has+expired.+Re-enter+it+at+evil.example").text
+    assert "evil.example" not in page
+
+
+def test_a_format_spec_in_untrusted_text_is_shown_literally_not_executed():
+    spec = "{port:>999999999}"
+    assert i18n.message("en", spec, port=80) == spec
+    assert i18n.message("zh", f"failed: {spec}", port=80) == f"failed: {spec}"
+
+
+def test_a_signed_message_carrying_a_format_spec_renders_at_its_own_size(client):
+    from otreedeploy import app as app_module
+
+    page = client.get(app_module._with_message("/", "{port:>20000000}", error=True))
+    assert len(page.content) < 200_000
+    assert "{port:&gt;20000000}" in page.text or "{port:>20000000}" in page.text

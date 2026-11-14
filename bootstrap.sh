@@ -23,6 +23,10 @@ APP_DIR=/opt/otreedeploy
 STATE_DIR=/var/lib/otreedeploy
 OTREE_HOME=/srv/otree
 APP_PORT="${OTREEDEPLOY_PORT:-8000}"
+# The uv release this script is tested against (tests/e2e, run in CI). Pinned because
+# uv's command-line behaviour changes between releases -- an unpinned install once broke
+# re-running this script -- and because the deploy pipeline calls uv on every upload.
+UV_VERSION=0.13.8
 
 OTREE_USER=otree
 APP_USER=otreedeploy
@@ -49,12 +53,16 @@ info "done"
 
 # ------------------------------------------------------------------------------- uv
 
-log "Installing uv"
-if ! command -v uv >/dev/null 2>&1; then
-    curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+log "Installing uv $UV_VERSION"
+# /usr/local/bin/uv is the one the services find first on their PATH, so that is the
+# copy to pin; a uv installed elsewhere for other purposes is left alone.
+if [[ "$(/usr/local/bin/uv --version 2>/dev/null | awk '{print $2}')" != "$UV_VERSION" ]]; then
+    curl -LsSf "https://astral.sh/uv/$UV_VERSION/install.sh" \
+        | env UV_INSTALL_DIR=/usr/local/bin UV_NO_MODIFY_PATH=1 sh >/dev/null
 fi
-command -v uv >/dev/null 2>&1 || die "uv is still not on PATH"
-info "$(uv --version)"
+[[ "$(/usr/local/bin/uv --version 2>/dev/null | awk '{print $2}')" == "$UV_VERSION" ]] \
+    || die "could not install uv $UV_VERSION into /usr/local/bin"
+info "$(/usr/local/bin/uv --version)"
 
 # ----------------------------------------------------------------------------- users
 
@@ -111,10 +119,17 @@ if [[ "$SRC_DIR" != "$APP_DIR" ]]; then
 fi
 chown -R "$APP_USER:$APP_USER" "$APP_DIR"
 
-# Build the app's own venv as the app user, so nothing in it is root-owned.
-su -s /bin/bash "$APP_USER" -c "cd $APP_DIR && uv venv --python 3.12 .venv" >/dev/null
-su -s /bin/bash "$APP_USER" -c "cd $APP_DIR && uv pip install --python $APP_DIR/.venv/bin/python -e ." >/dev/null
-info "built $APP_DIR/.venv"
+# Build the app's own venv as the app user, so nothing in it is root-owned. On a re-run
+# the venv already exists and the running service is using it: keep it and reinstall
+# into it, rather than deleting it under the service (which current uv also refuses to
+# do without --clear -- the reason upgrades used to abort here).
+if [[ -x "$APP_DIR/.venv/bin/python" ]]; then
+    info "keeping the existing $APP_DIR/.venv"
+else
+    su -s /bin/bash "$APP_USER" -c "cd $APP_DIR && /usr/local/bin/uv venv --python 3.12 .venv" >/dev/null
+fi
+su -s /bin/bash "$APP_USER" -c "cd $APP_DIR && /usr/local/bin/uv pip install --python $APP_DIR/.venv/bin/python -e ." >/dev/null
+info "installed the app into $APP_DIR/.venv"
 
 # ------------------------------------------------------------------------- password
 
@@ -125,7 +140,9 @@ log "Setting the management password"
 PASSWD_BIN="$APP_DIR/.venv/bin/otreedeploy-passwd"
 as_app() { su -s /bin/bash "$APP_USER" -c "$1"; }
 
+PASSWORD_WAS_SET=no
 if as_app "$PASSWD_BIN --check"; then
+    PASSWORD_WAS_SET=yes
     info "already set -- keeping it (change it on the System page, or with $PASSWD_BIN)"
 elif [[ -n "${OTREEDEPLOY_PASSWORD:-}" ]]; then
     # printf is a shell builtin and the value is piped, so it never appears in `ps`.
@@ -165,6 +182,11 @@ if [[ "$APP_PORT" != "8000" ]]; then
     sed -i "s/--port 8000/--port $APP_PORT/" /etc/systemd/system/otreedeploy.service
 fi
 systemctl daemon-reload
+# An install section changed between versions: re-enable the live experiment so its
+# links match the unit file installed above (e.g. the postgresql.service link).
+for unit in $(systemctl list-unit-files 'otree@*.service' --state=enabled --no-legend | awk '{print $1}'); do
+    systemctl reenable "$unit" >/dev/null 2>&1 && info "re-enabled $unit"
+done
 systemctl enable otreedeploy.service
 # `enable --now` would leave an already-running app on its old code, which makes this
 # script useless as the upgrade path. Restart unconditionally instead -- it starts a
@@ -201,6 +223,11 @@ if [[ $failures -gt 0 ]]; then
 fi
 
 ADDR=$(hostname -I 2>/dev/null | awk '{print $1}')
+if [[ $PASSWORD_WAS_SET == yes ]]; then
+    SIGN_IN="Sign in with the password you already had (this run kept it)"
+else
+    SIGN_IN="Sign in with the password you just chose"
+fi
 cat <<BANNER
 
   otreedeploy is ready.
@@ -208,7 +235,7 @@ cat <<BANNER
     Manage experiments   http://${ADDR:-<this-server>}:$APP_PORT
     Experiments serve on http://${ADDR:-<this-server>}/     (port 80)
 
-  Sign in with the password you just chose, then upload an .otreezip to deploy
+  $SIGN_IN, then upload an .otreezip to deploy
   your first experiment. Change the password later on the System page.
 
   The experiment on port 80 is deliberately open -- participants must reach it.

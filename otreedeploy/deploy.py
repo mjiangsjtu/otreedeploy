@@ -427,9 +427,16 @@ def restart(slug: str, force: bool = False) -> None:
 
 
 def rollback(slug: str, release: str, force: bool = False) -> None:
+    projects.validate(slug)
+    # `release` arrives from a form. Only a name this project itself recorded as a
+    # successful build is accepted: joined into a path unchecked, "../../other/releases/x"
+    # would point this project's `current` at another project's code.
+    record = db.get_release(slug, release)
+    if record is None or record.status != "success":
+        raise DeployError(f"'{release}' is not a successful release of '{slug}'")
     settings = config.get_settings()
     release_dir = settings.release_dir(slug, release)
-    if not (release_dir / ".venv").exists():
+    if release_dir.parent != settings.releases_dir(slug) or not (release_dir / ".venv").exists():
         raise DeployError(f"release {release} is not on disk any more")
     guard_disruption(slug, force)
 

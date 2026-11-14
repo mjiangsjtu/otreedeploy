@@ -123,6 +123,34 @@ def test_rollback(clean):
     assert config.get_settings().current_link(slug).resolve().name == first_release
 
 
+def test_rollback_refuses_a_release_name_that_is_not_one_of_this_projects_own(clean):
+    """The release name comes from a form; it must not be able to walk the filesystem."""
+    settings = config.get_settings()
+    db.create_project("victim", "victim")
+    db.create_project("other", "other")
+    stolen = settings.release_dir("other", "20260101-000000")
+    (stolen / ".venv").mkdir(parents=True)
+    db.finish_release(
+        db.create_release("other", "20260101-000000", "o.otreezip", "x"), "success", ""
+    )
+
+    for name in ("../../other/releases/20260101-000000", "20260101-000000", ""):
+        with pytest.raises(deploy.DeployError, match="not a successful release"):
+            deploy.rollback("victim", name)
+    assert not settings.current_link("victim").is_symlink()
+
+
+def test_rollback_refuses_a_release_whose_build_failed(clean):
+    settings = config.get_settings()
+    db.create_project("study", "study")
+    (settings.release_dir("study", "20260101-000000") / ".venv").mkdir(parents=True)
+    db.finish_release(
+        db.create_release("study", "20260101-000000", "s.otreezip", "x"), "failed", ""
+    )
+    with pytest.raises(deploy.DeployError, match="not a successful release"):
+        deploy.rollback("study", "20260101-000000")
+
+
 def test_rejects_bad_archive(clean, tmp_path):
     bogus = tmp_path / "notazip.otreezip"
     bogus.write_bytes(b"nope")

@@ -10,6 +10,9 @@ themselves are not guarded -- participants have to reach them.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import secrets
 import shutil
 import tempfile
 import threading
@@ -17,6 +20,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Iterator
+from urllib.parse import quote, urlencode
 
 from fastapi import FastAPI, Form, Request, UploadFile
 from fastapi.responses import (
@@ -65,8 +69,14 @@ def _i18n_context(request) -> dict:
         # str.format ignores a parameter the text does not mention.
         return i18n.translate(lang, text, port=config.otree_port(), **params)
 
+    def msg(text: str) -> str:
+        # For text that was not written in a template: notices, errors, event-log
+        # entries. These may carry values from outside (file names, exception text).
+        return i18n.message(lang, text, port=config.otree_port())
+
     return {
         "t": t,
+        "msg": msg,
         "lang": lang,
         "html_lang": i18n.HTML_LANG.get(lang, lang),
         "languages": i18n.LANGUAGES,
@@ -154,7 +164,44 @@ templates.env.filters["datetime"] = _datetime
 # ---------------------------------------------------------------------------- helpers
 
 
+# Notices and errors travel in the redirect's query string, so that a reload or a
+# bookmarked page does not depend on server-side state. Left unsigned, that would let any
+# link make this app display any text it likes -- "your password has expired, enter it
+# at ..." -- with the app's own styling. Each message therefore carries an HMAC under a
+# per-process key; one that does not verify is simply not shown. A restart drops a
+# pending message, which costs nothing.
+_MESSAGE_KEY = secrets.token_bytes(32)
+_MESSAGE_KINDS = ("notice", "error")
+
+
+def _message_signature(kind: str, message: str) -> str:
+    mac = hmac.new(_MESSAGE_KEY, f"{kind}\0{message}".encode(), hashlib.sha256)
+    return mac.hexdigest()[:32]
+
+
+def _with_message(target: str, message: str | None, error: bool = False) -> str:
+    if not message:
+        return target
+    kind = "error" if error else "notice"
+    query = urlencode({kind: message, "sig": _message_signature(kind, message)}, quote_via=quote)
+    return f"{target}?{query}"
+
+
+def _signed_messages(request: Request) -> dict:
+    """The notice/error in this request's URL, if and only if this app put it there."""
+    signature = request.query_params.get("sig", "")
+    found = {}
+    for kind in _MESSAGE_KINDS:
+        message = request.query_params.get(kind)
+        if message and hmac.compare_digest(signature, _message_signature(kind, message)):
+            found[kind] = message
+    return found
+
+
 def _render(request: Request, template: str, **context) -> HTMLResponse:
+    # A message the handler passes directly is trusted; one from the URL must verify.
+    for kind, message in _signed_messages(request).items():
+        context.setdefault(kind, message)
     return templates.TemplateResponse(
         request=request,
         name=template,
@@ -164,12 +211,7 @@ def _render(request: Request, template: str, **context) -> HTMLResponse:
 
 def _back(slug: str | None = None, message: str | None = None, error: bool = False) -> RedirectResponse:
     target = f"/p/{slug}" if slug else "/"
-    if message:
-        key = "error" if error else "notice"
-        from urllib.parse import quote
-
-        target += f"?{key}={quote(message)}"
-    return RedirectResponse(target, status_code=303)
+    return RedirectResponse(_with_message(target, message, error), status_code=303)
 
 
 def _msg(request: Request, text: str, **params) -> str:
@@ -231,15 +273,13 @@ def _handle(action, slug: str, success: str):
 
 
 @app.get("/", response_class=HTMLResponse)
-def index(request: Request, notice: str | None = None, error: str | None = None):
+def index(request: Request):
     active = deploy.active_slug()
     overviews = [_overview(p.slug, active=active) for p in db.list_projects()]
     return _render(
         request,
         "index.html",
         overviews=overviews,
-        notice=notice,
-        error=error,
         events=db.recent_events(limit=8),
     )
 
@@ -265,10 +305,10 @@ def set_language(code: str, request: Request, next: str = "/"):
 
 
 @app.get("/login", response_class=HTMLResponse)
-def login_form(request: Request, next: str = "/", error: str | None = None):
+def login_form(request: Request, next: str = "/"):
     if not auth.is_configured() or auth.check_token(request.cookies.get(auth.COOKIE)):
         return RedirectResponse(auth.safe_next(next), status_code=303)
-    return _render(request, "login.html", next=auth.safe_next(next), error=error)
+    return _render(request, "login.html", next=auth.safe_next(next))
 
 
 @app.post("/login")
@@ -362,10 +402,7 @@ def change_password(
 
 
 def _system_back(message: str, error: bool = False) -> RedirectResponse:
-    from urllib.parse import quote
-
-    key = "error" if error else "notice"
-    return RedirectResponse(f"/system?{key}={quote(message)}", status_code=303)
+    return RedirectResponse(_with_message("/system", message, error), status_code=303)
 
 
 # ------------------------------------------------------------------------------ pages
@@ -460,17 +497,13 @@ def job_stream(job_id: str):
 
 
 @app.get("/p/{slug}", response_class=HTMLResponse)
-def project_page(
-    request: Request, slug: str, notice: str | None = None, error: str | None = None
-):
+def project_page(request: Request, slug: str):
     project = _project_or_404(slug)
     if project is None:
         return _back(None, f"no project called '{slug}'", error=True)
     return _render(
         request,
         "project.html",
-        notice=notice,
-        error=error,
         releases=db.list_releases(slug, limit=20),
         sessions=postgres.list_sessions(slug),
         backups=_backups(slug),
@@ -628,9 +661,7 @@ def logs_stream(slug: str):
 
 
 @app.get("/p/{slug}/data", response_class=HTMLResponse)
-def data_page(
-    request: Request, slug: str, notice: str | None = None, error: str | None = None
-):
+def data_page(request: Request, slug: str):
     project = _project_or_404(slug)
     if project is None:
         return _back(None, f"no project called '{slug}'", error=True)
@@ -641,8 +672,6 @@ def data_page(
         sessions=postgres.list_sessions(slug),
         has_data=postgres.has_otree_tables(slug),
         status=deploy.status_of(slug),
-        notice=notice,
-        error=error,
     )
 
 
@@ -712,13 +741,11 @@ def _existing_ancestor(path: Path) -> str:
 
 
 @app.get("/system", response_class=HTMLResponse)
-def system(request: Request, notice: str | None = None, error: str | None = None):
+def system(request: Request):
     usage = shutil.disk_usage(_existing_ancestor(config.get_settings().otree_home))
     return _render(
         request,
         "system.html",
-        notice=notice,
-        error=error,
         disk={
             "total": usage.total,
             "used": usage.used,

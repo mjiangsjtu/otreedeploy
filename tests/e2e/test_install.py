@@ -35,7 +35,6 @@ def test_no_service_runs_as_root(server, manager, workdir):
     assert "root" not in owners
 
 
-@pytest.mark.xfail(strict=True, reason="M5: re-running bootstrap.sh aborts at `uv venv`")
 def test_rerunning_bootstrap_upgrades_in_place_and_keeps_everything(server, manager, workdir):
     experiment, codes = deploy_live(server, manager, labdemo(workdir), sessions=1)
     started = time.time()
@@ -60,7 +59,6 @@ def test_the_live_experiment_comes_back_after_a_reboot(server, manager, workdir,
     assert http_status(f"http://{server.ip}:8000/login") == 200
 
 
-@pytest.mark.xfail(strict=True, reason="N2: Requires=postgresql stops the experiment for good")
 def test_the_live_experiment_comes_back_after_postgresql_is_stopped_and_started(
     server, manager, workdir
 ):
@@ -71,3 +69,8 @@ def test_the_live_experiment_comes_back_after_postgresql_is_stopped_and_started(
     wait_for(lambda: server.unit_active("labdemo"), timeout=60, what="otree@labdemo active")
     wait_for(lambda: experiment.participant_codes(codes[0]), timeout=60,
              what="the experiment answering again")
+    # And a plain restart, which also used to leave oTree with a dead connection.
+    server.sh("systemctl restart postgresql")
+    wait_for(lambda: experiment.participant_codes(codes[0]), timeout=60,
+             what="the experiment answering after a restart")
+    assert server.unit_enabled("labdemo")
