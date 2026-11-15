@@ -22,6 +22,9 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The upgrade tests install earlier versions from the history (git archive).
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@v6
       - run: uv venv --python 3.12 && uv pip install -e ".[dev]"
       - run: .venv/bin/python -m pytest tests/e2e -v -rxX
